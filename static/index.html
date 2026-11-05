@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vidFrame — visual video analysis</title>
+  <meta name="description" content="Turn a video into a timestamped visual report by reading it frame by frame with a vision-language model." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap" rel="stylesheet" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/vendor/katex.min.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/vendor/marked.min.js" defer></script>
+  <script src="/static/vendor/purify.min.js" defer></script>
+  <script src="/static/vendor/katex.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <a class="brand" href="#/" aria-label="vidFrame home">
+        <span class="brand-mark">
+          <svg viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="brandGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#ffcf6b" />
+                <stop offset="1" stop-color="#ff8a3d" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="9" fill="url(#brandGrad)" />
+            <path d="M12.4 10.2v11.6L22 16z" fill="#14100a" />
+            <rect x="5.4" y="5.4" width="21.2" height="21.2" rx="6.2" fill="none" stroke="#14100a" stroke-opacity=".22" />
+          </svg>
+        </span>
+        <span class="brand-text">vidFrame</span>
+      </a>
+      <p class="tagline">See what the video shows.</p>
+
+      <a class="new-job" href="#/">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" stroke-linecap="round" />
+        </svg>
+        New analysis
+      </a>
+
+      <div class="sidebar-section">
+        <div class="section-label">Recent</div>
+        <div id="job-list" class="job-list">
+          <div class="sidebar-empty">No analyses yet</div>
+        </div>
+      </div>
+
+      <div class="sidebar-foot">
+        <button class="side-btn" id="settings-btn" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <circle cx="12" cy="12" r="3.2" />
+            <path d="M19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4.4l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4.4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2Z" stroke-linejoin="round" />
+          </svg>
+          Settings
+        </button>
+        <div class="vlm-line" id="vlm-status" title="Vision model status">
+          <span class="dot dot-idle"></span>
+          <span class="vlm-text">Checking model…</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- HOME -->
+      <section id="view-home" class="view">
+        <div class="home">
+          <div class="hero">
+            <div class="eyebrow"><span class="pulse"></span> Visual video intelligence</div>
+            <h1>See what the video<br /><em>actually shows.</em></h1>
+            <p class="lede">
+              Transcripts miss the slides, charts, interfaces, and physical action on screen.
+              vidFrame samples your video frame by frame, has a vision model read each one, and
+              compiles a timestamped visual report you can re-extract and recompile.
+            </p>
+          </div>
+
+          <div class="upload-panel">
+            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload a video">
+              <input type="file" id="file-input" accept="video/*,.mkv,.ts" hidden />
+              <div class="dz-inner">
+                <div class="dz-icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                    <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" stroke-linecap="round" stroke-linejoin="round" />
+                    <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15" stroke-linecap="round" />
+                  </svg>
+                </div>
+                <h2>Drop a video here</h2>
+                <p>or <span class="link-look">browse your files</span> · MP4, MOV, MKV, WebM, AVI</p>
+                <div class="dz-formats"><span>1 fps</span><span>visual-only</span><span>timestamped</span></div>
+              </div>
+              <div class="uploading-state hidden" id="uploading-state">
+                <div class="upload-label"><span>Uploading</span><strong id="upload-pct">0%</strong></div>
+                <div class="bar"><div class="bar-fill" id="upload-bar"></div></div>
+                <p id="upload-name" class="upload-name"></p>
+              </div>
+            </div>
+
+            <div class="options-row">
+              <label class="field">
+                <span>Sample rate</span>
+                <select id="opt-fps">
+                  <option value="0.5">1 frame / 2s</option>
+                  <option value="1" selected>1 frame / sec</option>
+                  <option value="2">2 frames / sec</option>
+                  <option value="4">4 frames / sec</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Frame cap</span>
+                <input id="opt-max" type="number" min="10" max="5000" step="10" value="900" />
+              </label>
+              <label class="field">
+                <span>Provider</span>
+                <select id="opt-provider">
+                  <option value="local">Local / vLLM</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+              </label>
+              <label class="field field-wide">
+                <span>Vision model</span>
+                <input id="opt-model" list="model-list" placeholder="model name" autocomplete="off" />
+              </label>
+              <button class="ghost" id="advanced-toggle" type="button" aria-expanded="false">
+                Advanced
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
+            </div>
+            <div class="advanced hidden" id="advanced">
+              <label class="field">
+                <span>Frames per request</span>
+                <input id="opt-batch" type="number" min="1" max="8" value="4" />
+              </label>
+              <label class="field field-wide">
+                <span>Report compile model <small>optional</small></span>
+                <input id="opt-compile-model" list="model-list" placeholder="same as vision model" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>STT language</span>
+                <input id="opt-stt-language" placeholder="auto" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span><input id="opt-transcript-appendix" type="checkbox" /> Include transcript in PDF</span>
+              </label>
+              <label class="field">
+                <span>Timeout (s)</span>
+                <input id="opt-timeout" type="number" min="10" max="900" value="180" />
+              </label>
+            </div>
+            <datalist id="model-list"></datalist>
+            <p class="hint">Near-identical consecutive frames are skipped. Very long videos are resampled to stay under the frame cap.</p>
+          </div>
+
+          <div class="steps">
+            <div class="step">
+              <div class="step-num">01</div>
+              <div><h3>Extract</h3><p>OpenCV samples the video at your chosen rate and drops near-duplicate frames.</p></div>
+            </div>
+            <div class="step">
+              <div class="step-num">02</div>
+              <div><h3>Read</h3><p>A vision model describes every frame: scenes, people, slides, charts, UI, and on-screen text.</p></div>
+            </div>
+            <div class="step">
+              <div class="step-num">03</div>
+              <div><h3>Compile</h3><p>Observations become a timestamped report with key moments and a searchable visual timeline.</p></div>
+            </div>
+          </div>
+
+          <section class="recent">
+            <div class="recent-head">
+              <h2>Recent analyses</h2>
+              <button class="ghost small" id="refresh-jobs" type="button">Refresh</button>
+            </div>
+            <div id="recent-grid" class="recent-grid"></div>
+          </section>
+
+          <footer class="home-foot">
+            <span>vidFrame</span> · visual-only analysis, built for video you need to actually understand.
+          </footer>
+        </div>
+      </section>
+
+      <!-- JOB -->
+      <section id="view-job" class="view hidden">
+        <div class="job-wrap">
+          <div class="crumbs">
+            <a href="#/">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M19 12H5m0 0 6-6m-6 6 6 6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+              All analyses
+            </a>
+            <span class="crumb-sep">/</span>
+            <span id="crumb-title">Analysis</span>
+          </div>
+
+          <header class="job-head">
+            <div class="job-title-block">
+              <div class="eyebrow" id="job-eyebrow">Analysis</div>
+              <h1 id="job-title">Loading…</h1>
+              <p class="job-file" id="job-filename"></p>
+              <div class="chips" id="job-chips"></div>
+            </div>
+            <div class="job-actions" id="job-actions">
+              <button class="button" id="copy-note-btn" type="button" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 5.5A1.5 1.5 0 0 0 13.5 4h-8A1.5 1.5 0 0 0 4 5.5v8A1.5 1.5 0 0 0 5.5 15H7" />
+                </svg>
+                Copy note
+              </button>
+              <a class="button primary" id="download-md" href="#" hidden>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                  <path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                Export .md
+              </a>
+              <details class="menu" id="job-menu">
+                <summary class="button icon-button" aria-label="More actions">
+                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" />
+                  </svg>
+                </summary>
+                <div class="menu-pop" id="menu-pop"></div>
+              </details>
+            </div>
+          </header>
+
+          <div id="job-banner"></div>
+
+          <section id="progress-card" class="progress-card">
+            <div class="progress-top">
+              <span class="stage-pill" id="stage-pill">Queued</span>
+              <span class="progress-message" id="progress-message">Waiting to start</span>
+              <span class="progress-pct" id="progress-pct">0%</span>
+            </div>
+            <div class="bar big"><div class="bar-fill" id="progress-bar"></div></div>
+            <div class="stepper" id="stepper"></div>
+            <div class="progress-meta">
+              <span id="progress-counts"></span>
+              <span id="progress-eta"></span>
+              <span id="progress-elapsed"></span>
+            </div>
+            <div id="live-frames" class="live-frames hidden"></div>
+            <div class="live-notes hidden" id="live-notes">
+              <div class="live-notes-head">
+                <span>Live notes</span>
+                <span class="live-notes-count" id="live-notes-count">0</span>
+              </div>
+              <div class="live-notes-body" id="live-notes-body"></div>
+            </div>
+            <details class="log-box" id="log-box">
+              <summary>Live log <span class="log-count" id="log-count">0</span></summary>
+              <div class="log" id="log"></div>
+            </details>
+          </section>
+
+          <section id="job-content" class="job-content hidden">
+            <div class="tabs" role="tablist">
+              <button class="tab active" data-tab="report" type="button">Report</button>
+              <button class="tab" data-tab="timeline" type="button">Timeline</button>
+              <button class="tab" data-tab="frames" type="button">Frames <span class="tab-count" id="tab-frame-count"></span></button>
+              <button class="tab" data-tab="data" type="button">Data</button>
+            </div>
+
+            <div class="tabpane" id="tab-report">
+              <div class="report-layout">
+                <article class="note" id="note"></article>
+                <aside class="toc">
+                  <div class="toc-title">Contents</div>
+                  <nav id="toc"></nav>
+                </aside>
+              </div>
+            </div>
+
+            <div class="tabpane hidden" id="tab-timeline">
+              <div id="timeline"></div>
+            </div>
+
+            <div class="tabpane hidden" id="tab-frames">
+              <div class="frames-toolbar">
+                <div class="search-field">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" stroke-linecap="round" />
+                  </svg>
+                  <input id="frame-search" type="search" placeholder="Search descriptions, text, objects…" />
+                </div>
+                <select id="scene-filter" aria-label="Filter by scene"><option value="">All scenes</option></select>
+                <label class="check"><input type="checkbox" id="show-dupes" checked /> Show near-duplicates</label>
+                <span class="frames-count" id="frames-count"></span>
+              </div>
+              <div id="frames-grid" class="frames-grid"></div>
+              <div id="frames-empty" class="empty hidden">
+                <p>No frames match this filter.</p>
+              </div>
+              <div class="load-more-wrap"><button class="button" id="load-more" type="button" hidden>Load more frames</button></div>
+            </div>
+
+            <div class="tabpane hidden" id="tab-data">
+              <div id="data-view"></div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Settings -->
+  <div class="modal hidden" id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div>
+          <div class="eyebrow">Configuration</div>
+          <h2 id="settings-title">Settings</h2>
+        </div>
+        <button class="icon-button plain" data-close="settings-modal" type="button" aria-label="Close settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" stroke-linecap="round" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="conn-card" id="settings-status">
+        <span class="dot dot-idle"></span>
+        <div><strong>Checking vision endpoint…</strong><p>Waiting for a response</p></div>
+      </div>
+
+      <label class="field"><span>Endpoint <small>server-side</small></span><input id="set-base" readonly /></label>
+      <div class="grid-2">
+        <label class="field"><span>Default provider</span>
+          <select id="set-provider">
+            <option value="local">Local / vLLM</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+        </label>
+        <label class="field"><span>Local model</span><input id="set-model" list="model-list" autocomplete="off" /></label>
+        <label class="field"><span>OpenRouter model</span><input id="set-openrouter-model" list="model-list" autocomplete="off" /></label>
+      </div>
+      <div class="grid-2">
+        <label class="field"><span>Default sample rate</span>
+          <select id="set-fps">
+            <option value="0.5">1 frame / 2s</option>
+            <option value="1">1 frame / sec</option>
+            <option value="2">2 frames / sec</option>
+            <option value="4">4 frames / sec</option>
+          </select>
+        </label>
+        <label class="field"><span>Default frame cap</span><input id="set-max" type="number" min="10" max="5000" /></label>
+        <label class="field"><span>Frames per request</span><input id="set-batch" type="number" min="1" max="8" /></label>
+        <label class="field"><span>Compile model <small>optional</small></span><input id="set-compile-model" list="model-list" autocomplete="off" /></label>
+      </div>
+      <p class="hint">Endpoints and API keys come from <code>.env</code> on the server. Model choices are fetched from the selected provider when available; you can type any model name.</p>
+
+      <footer class="modal-foot">
+        <button class="button" id="test-vlm" type="button">Test connection</button>
+        <button class="button primary" id="save-settings" type="button">Save defaults</button>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Lightbox -->
+  <div class="lightbox hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Frame detail">
+    <button class="lb-close icon-button plain" id="lb-close" type="button" aria-label="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+        <path d="m6 6 12 12M18 6 6 18" stroke-linecap="round" />
+      </svg>
+    </button>
+    <button class="lb-nav prev" id="lb-prev" type="button" aria-label="Previous frame">‹</button>
+    <div class="lb-stage">
+      <img id="lb-image" alt="Video frame" />
+      <div class="lb-caption"><span id="lb-time"></span><span id="lb-scene"></span></div>
+    </div>
+    <aside class="lb-details" id="lb-details"></aside>
+    <button class="lb-nav next" id="lb-next" type="button" aria-label="Next frame">›</button>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.log
+.DS_Store
+.pdf-render/node_modules/
