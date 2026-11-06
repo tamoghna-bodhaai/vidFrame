@@ -6,7 +6,7 @@ if [ ! -x .venv/bin/python ]; then
   uv venv --python /usr/bin/python3 --system-site-packages .venv
 fi
 
-if ! .venv/bin/python -c "import uvicorn, cv2, fastapi, httpx" >/dev/null 2>&1; then
+if ! .venv/bin/python -c "import uvicorn, cv2, fastapi, httpx, manim" >/dev/null 2>&1; then
   uv pip install --python .venv/bin/python -r requirements.txt
 fi
 

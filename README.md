@@ -408,3 +408,41 @@ scripts/
 static/
   index.html, app.js, styles.css, vendor/ (marked + DOMPurify)
 ```
+
+### Extract teaching episodes from a processed lecture
+
+Run `python -m app.persona data/jobs/<job-id> --teacher-id <stable-teacher-id>`.
+This offline command reads the saved timestamped transcript and frame observations
+and atomically replaces only `persona/episodes.jsonl` inside that job. Rerun after
+the source extraction finishes to pick up newly saved evidence.
+
+Each row is a candidate example for predicting a teaching move. Use `context`
+as the model input and `target.moves` and `target.speech.text` as possible
+labels after review. Target visuals are contemporaneous evidence for reviewers.
+Keep `followup` out of the input. Segment IDs and frame indices refer to
+transcript.json and observations.jsonl respectively. Frame descriptions are
+upstream model observations. Empty visual lists mean no usable snapshot in
+that interval. The first extractor recognizes six explicit English cue types
+and can legitimately produce zero rows. The supplied teacher ID groups the
+recording; verify speaker attribution and cue meaning before training.
+
+For richer teaching episodes, add `--semantic`. This sends windows of saved
+transcript text and frame annotations to the configured model. Use `--model`
+to override the compile model. No audio, video or frame images are sent.
+Results are published atomically to `persona/semantic-episodes.jsonl`, separate
+from the cue extractor. Successful windows are cached by evidence, prompt and
+model under `persona/semantic-cache/` so an interrupted run can resume.
+
+Semantic schema v2 uses lists for speech and visuals in context, target and
+followup. Each target move describes the instructional method and cites sources:
+sN is the zero-based position in the sorted nonempty transcript, and fN the
+saved frame index. The attached rows preserve original IDs, timestamps and text.
+Only context is input for next-move prediction. Labels are model interpretations
+to review, particularly inferred connections between a gesture and a diagram.
+Snapshots are sampled, and episodes may be supported by one modality alone.
+
+### Experimental explainers
+
+The **Explainers** tab on a completed lecture accepts a topic from its study notes and creates an animated MP4 whose length follows the material. It uses the saved notes for content, the transcript and teaching episodes for instructional style, and a short speech sample from the original video audio for cloned narration. The matching transcript accompanies the voice reference. Each request is a background job with a saved history, playback, and MP4 download. Generation requires a transcript with usable speech, `VIDFRAME_OPENROUTER_API_KEY`, Manim, and FFmpeg. `./run.sh` installs the Python Manim package; Manim's system Cairo/Pango dependencies must also be available. The experiment is intended for the local, single-user app.
+
+Voice synthesis uses OpenRouter's `fish-audio/s2.1-pro` model and checks its endpoint for voice-cloning support before making a speech request. The exact Voxtral 2603 OpenRouter route currently does not advertise that capability. A render can take several minutes; interrupted generations restart from the saved lecture artifacts when the server returns. If a topic is not supported by the notes, the explainer card reports the error rather than inventing source material.

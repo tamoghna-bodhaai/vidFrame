@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import zipfile
@@ -13,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Str
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import __version__, db, pipeline
+from . import __version__, db, pipeline, explainers
 from .config import settings
 from .utils import fmt_ts
 from .vlm import VLMConfig, check_health
@@ -27,7 +28,13 @@ TERMINAL_STATUSES = {"done", "failed", "cancelled", "interrupted", "paused"}
 async def lifespan(_app: FastAPI):
     db.init_db()
     db.mark_interrupted()
+    db.mark_explainers_interrupted()
     settings.ensure_dirs()
+    for record in db.interrupted_explainers():
+        job = db.get_job(record["job_id"])
+        if job and explainers.available(job):
+            db.update_explainer(job["id"], record["id"], status="queued", progress=0, message="Resuming after server restart", error=None)
+            explainers.start(job, record)
     yield
 
 
@@ -325,9 +332,78 @@ async def delete_job(job_id: str) -> dict[str, Any]:
     job = _require_job(job_id)
     if pipeline.is_running(job_id):
         raise HTTPException(status_code=409, detail="Cancel the job before deleting it")
+    if explainers.is_running(job_id):
+        raise HTTPException(status_code=409, detail="Wait for the explainer render before deleting the lecture")
     shutil.rmtree(_job_dir(job), ignore_errors=True)
     db.delete_job(job_id)
     return {"ok": True}
+
+
+class ExplainerRequest(BaseModel):
+    topic: str = Field(min_length=3, max_length=200)
+
+
+def _explainer_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = {key: value for key, value in row.items() if key != "output_dir"}
+    if row["status"] == "done":
+        base = f"/api/jobs/{row['job_id']}/explainers/{row['id']}"
+        payload["playback_url"] = base + "/video"
+        payload["download_url"] = base + "/download"
+    return payload
+
+
+@app.post("/api/jobs/{job_id}/explainers", status_code=202)
+async def create_explainer(job_id: str, body: ExplainerRequest) -> dict[str, Any]:
+    job = _require_job(job_id)
+    if not explainers.available(job):
+        raise HTTPException(status_code=409, detail="Completed study notes, transcript, and teacher speech are required")
+    topic = body.topic.strip()
+    if len(topic) < 3:
+        raise HTTPException(status_code=422, detail="Enter a topic from this lecture")
+    if not settings.openrouter_api_key:
+        raise HTTPException(status_code=409, detail="Set VIDFRAME_OPENROUTER_API_KEY for cloned narration")
+    if not explainers.manim_command():
+        raise HTTPException(status_code=409, detail="Install Manim to render explainers")
+    digest = hashlib.sha256((_job_dir(job) / "note.json").read_bytes()).hexdigest()
+    record = db.create_explainer(job_id, topic, digest, explainers.TTS_MODEL, str(_job_dir(job) / "explainers"))
+    explainers.start(job, record)
+    return _explainer_payload(record)
+
+
+@app.get("/api/jobs/{job_id}/explainers")
+async def list_explainers(job_id: str) -> dict[str, Any]:
+    job = _require_job(job_id)
+    return {"available": explainers.available(job), "items": [_explainer_payload(x) for x in db.list_explainers(job_id)]}
+
+
+@app.get("/api/jobs/{job_id}/explainers/{explainer_id}")
+async def get_explainer(job_id: str, explainer_id: str) -> dict[str, Any]:
+    _require_job(job_id)
+    row = db.get_explainer(job_id, explainer_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Explainer not found")
+    return _explainer_payload(row)
+
+
+def _explainer_video(job_id: str, explainer_id: str, download: bool) -> FileResponse:
+    _require_job(job_id)
+    row = db.get_explainer(job_id, explainer_id)
+    if row is None or row["status"] != "done":
+        raise HTTPException(status_code=404, detail="Explainer video not ready")
+    path = Path(row["output_dir"]) / "explainer.mp4"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Explainer video missing")
+    return FileResponse(path, media_type="video/mp4", filename=f"explainer-{explainer_id}.mp4" if download else None)
+
+
+@app.get("/api/jobs/{job_id}/explainers/{explainer_id}/video")
+def play_explainer(job_id: str, explainer_id: str) -> FileResponse:
+    return _explainer_video(job_id, explainer_id, False)
+
+
+@app.get("/api/jobs/{job_id}/explainers/{explainer_id}/download")
+def download_explainer(job_id: str, explainer_id: str) -> FileResponse:
+    return _explainer_video(job_id, explainer_id, True)
 
 
 def _frames_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -543,6 +619,59 @@ async def get_note(job_id: str, format: Literal["md", "json"] = "md") -> Any:
     if format == "md":
         return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
     return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
+_episode_tasks: dict[str, asyncio.Task] = {}
+_episode_errors: dict[str, str] = {}
+
+
+@app.post("/api/jobs/{job_id}/teaching-episodes", status_code=202)
+async def generate_teaching_episodes(job_id: str) -> dict:
+    from .persona_semantic import extract_semantic
+    from .vlm import VLMClient
+
+    job = _require_job(job_id)
+    folder = _job_dir(job)
+    if (folder / "persona" / "semantic-episodes.jsonl").is_file():
+        return {"status": "ready"}
+    if job_id in _episode_tasks:
+        return {"status": "running"}
+    if not all((folder / name).is_file() for name in ("transcript.json", "observations.jsonl")):
+        raise HTTPException(status_code=409, detail="Saved transcript and frame observations are required.")
+    config = job.get("config") or {}
+    async def generate():
+        try:
+            async with VLMClient(VLMConfig(model=config.get("model") or settings.vlm_model,
+                                           provider=config.get("provider") or settings.vlm_provider)) as client:
+                await extract_semantic(folder, f"lecture-{job_id}", client)
+        except Exception as exc:
+            _episode_errors[job_id] = str(exc)
+        finally:
+            _episode_tasks.pop(job_id, None)
+
+    _episode_errors.pop(job_id, None)
+    _episode_tasks[job_id] = asyncio.create_task(generate())
+    return {"status": "running"}
+
+
+@app.get("/api/jobs/{job_id}/teaching-episodes")
+def teaching_episodes(job_id: str) -> dict:
+    folder = _job_dir(_require_job(job_id)) / "persona"
+    for name in ("semantic-episodes.jsonl", "episodes.jsonl"):
+        path = folder / name
+        if path.is_file():
+            with path.open(encoding="utf-8") as stream:
+                return {"available": True, "episodes": [json.loads(line) for line in stream if line.strip()]}
+    return {"available": False, "episodes": [], "running": job_id in _episode_tasks, "error": _episode_errors.get(job_id)}
+
+
+@app.get("/api/jobs/{job_id}/source-video")
+def source_video(job_id: str) -> FileResponse:
+    directory = _job_dir(_require_job(job_id))
+    for path in directory.glob("source.*"):
+        if path.suffix.lower() in ALLOWED_EXTENSIONS and path.is_file():
+            return FileResponse(path)
+    raise HTTPException(status_code=404, detail="Source video unavailable")
 
 
 @app.get("/api/jobs/{job_id}/transcript")

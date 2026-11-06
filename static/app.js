@@ -80,6 +80,8 @@
     uploading: false,
     searchTimer: null,
     loadedAssetsFor: "",
+    explainerTimer: null,
+    explainerSig: "",
   };
 
   const icons = {
@@ -103,6 +105,48 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+
+  function mathHtml(source, ocr = false) {
+    const value = String(source ?? "").replace(/\x08/g, "\\b").replace(/\x0c/g, "\\f");
+    const render = (expression, displayMode = false) => {
+      if (!window.katex) return esc(expression);
+      try {
+        return window.katex.renderToString(expression, { displayMode, throwOnError: true, trust: false, output: "html" });
+      } catch {
+        return `<span class="math-error" title="${esc(expression)}">Equation could not be rendered</span>`;
+      }
+    };
+    // OCR often supplies a whole equation without Markdown delimiters.
+    if (ocr && !/\$|\\[([]/.test(value) &&
+        ((/[=<>]/.test(value) && !/[.!?]$/.test(value)) ||
+         /\\(?:frac|dfrac|sqrt|lim|theta|alpha|beta)\b/.test(value))) {
+      return render(value);
+    }
+    return value.split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/g)
+      .map((part) => {
+        if (part.startsWith("$$") && part.endsWith("$$")) return render(part.slice(2, -2), true);
+        if (part.startsWith("$") && part.endsWith("$")) return render(part.slice(1, -1));
+        if (part.startsWith("\\(") && part.endsWith("\\)")) return render(part.slice(2, -2));
+        if (part.startsWith("\\[") && part.endsWith("\\]")) return render(part.slice(2, -2), true);
+        return esc(part);
+      }).join("");
+  }
+
+  function repairDisplayMath(markdown) {
+    // JSON decoding can turn the starts of \beta and \frac into control chars.
+    const lines = String(markdown).replace(/\x08/g, "\\b").replace(/\x0c/g, "\\f").split("\n");
+    return lines.map((line, index) => {
+      const content = line.trim();
+      // A one-line display equation with a missing closing $$ is distinct
+      // from a multiline equation: it ends at a blank line or the document.
+      if (content.startsWith("$$") && content.length > 2 &&
+          content.indexOf("$$", 2) === -1 &&
+          (index === lines.length - 1 || !lines[index + 1].trim())) {
+        return `${line}$$`;
+      }
+      return line;
+    }).join("\n");
+  }
 
   function fmtDuration(seconds) {
     if (seconds == null || Number.isNaN(Number(seconds))) return "—";
@@ -389,7 +433,8 @@
     try {
       const job = await api(`/api/jobs/${id}`);
       applyJob(job);
-      if (!job.note_available) switchTab("costs");
+      if (location.hash.endsWith("/episodes")) switchTab("episodes");
+      else if (!job.note_available) switchTab("costs");
     } catch (error) {
       toast(error.message, "error");
       location.hash = "#/";
@@ -401,6 +446,8 @@
   }
 
   function resetJobUI() {
+    clearTimeout(state.explainerTimer);
+    state.explainerSig = "";
     $("#job-title").textContent = "Loading…";
     $("#job-filename").textContent = "";
     $("#job-chips").innerHTML = "";
@@ -685,48 +732,24 @@
   }
 
   function renderLiveNotes(markdown) {
-    const math = (source) => {
-      if (!window.katex) return esc(source);
-      try {
-        return window.katex.renderToString(source, { throwOnError: true, trust: false, output: "html" });
-      } catch {
-        return esc(source);
-      }
-    };
-    const inline = (source) => String(source).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/g)
-      .map((part) => {
-        if (part.startsWith("$$") && part.endsWith("$$")) return math(part.slice(2, -2));
-        if (part.startsWith("$") && part.endsWith("$")) return math(part.slice(1, -1));
-        if (part.startsWith("\\(") && part.endsWith("\\)")) return math(part.slice(2, -2));
-        if (part.startsWith("\\[") && part.endsWith("\\]")) return math(part.slice(2, -2));
-        return esc(part);
-      }).join("");
-    const label = (source) => {
-      const value = String(source).trim();
-      if (/^(?:\$|\\[([])/.test(value)) return inline(value);
-      // Screen text is OCR, often an equation without Markdown math delimiters.
-      if ((/[=<>]/.test(value) && !/[.!?]$/.test(value)) ||
-          /\\(?:frac|sqrt|theta|alpha|beta)\b/.test(value)) return math(value);
-      return inline(value);
-    };
     const { entries, summary } = parseLiveNotes(markdown);
     $("#live-notes-count").textContent = String(entries.length);
     const body = $("#live-notes-body");
     const stick = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
     if (!entries.length) {
       body.innerHTML = `<div class="live-notes-empty">${
-        summary ? esc(summary) : "Waiting for the first frame to be analyzed…"
+        summary ? mathHtml(summary) : "Waiting for the first frame to be analyzed…"
       }</div>`;
       $("#live-notes").classList.remove("hidden");
       return;
     }
     body.innerHTML = entries
       .map((entry) => {
-        const description = entry.description.map((line) => `<p class="live-note-desc">${inline(line)}</p>`).join("");
+        const description = entry.description.map((line) => `<p class="live-note-desc">${mathHtml(line)}</p>`).join("");
         const texts = entry.onScreen.length
           ? `<div class="live-note-text">${entry.onScreen
               .slice(0, 14)
-              .map((text) => `<span>${label(text)}</span>`)
+              .map((text) => `<span>${mathHtml(text, true)}</span>`)
               .join("")}</div>`
           : "";
         const diagrams = entry.diagrams
@@ -734,13 +757,13 @@
             (diagram) => `
             <div class="live-note-diagram">
               <span class="diagram-badge">${icons.diagram}${esc(diagram.type)}</span>
-              <strong>${esc(diagram.title)}</strong>
-              ${diagram.description ? `<p class="live-note-desc">${inline(diagram.description)}</p>` : ""}
+              <strong>${mathHtml(diagram.title)}</strong>
+              ${diagram.description ? `<p class="live-note-desc">${mathHtml(diagram.description)}</p>` : ""}
               ${
                 diagram.values.length
                   ? `<div class="live-note-text">${diagram.values
                       .slice(0, 10)
-                      .map((value) => `<span>${label(value)}</span>`)
+                      .map((value) => `<span>${mathHtml(value, true)}</span>`)
                       .join("")}</div>`
                   : ""
               }
@@ -751,7 +774,7 @@
           <div class="live-note">
             <div class="live-note-top">
               <span class="live-note-time">${esc(entry.time)}</span>
-              <span class="live-note-title">${esc(entry.title || "Frame analyzed")}</span>
+              <span class="live-note-title">${mathHtml(entry.title || "Frame analyzed")}</span>
             </div>
             ${description}
             ${texts}
@@ -932,9 +955,13 @@
         {
           name: "displayMath",
           level: "block",
-          start: (src) => src.indexOf("$$"),
+          start: (src) => {
+            const match = /(?:^|\n)\$\$/.exec(src);
+            return match ? match.index + (src[match.index] === "\n" ? 1 : 0) : -1;
+          },
           tokenizer(src) {
-            const match = /^\$\$\s*\n([\s\S]+?)\n\s*\$\$(?:\n|$)/.exec(src);
+            const match = /^\$\$([^\n]+?)\$\$(?:\n|$)/.exec(src) ||
+              /^\$\$[ \t]*\n([\s\S]+?)\n[ \t]*\$\$(?:\n|$)/.exec(src);
             if (match) return { type: "displayMath", raw: match[0], text: match[1], display: "true" };
           },
           renderer: mathPlaceholder,
@@ -944,7 +971,7 @@
           level: "inline",
           start: (src) => src.search(/\$|\\[([]/),
           tokenizer(src) {
-            const match = /^(?:\$\$([\s\S]+?)\$\$|\$([^\s$](?:[^$\n]*?[^\s$])?)\$|\\\(([\s\S]+?)\\\)|\\\[([\s\S]+?)\\\])/.exec(src);
+            const match = /^(?:\$\$([^\n]+?)\$\$|\$([^\s$](?:[^$\n]*?[^\s$])?)\$|\\\(([^\n]+?)\\\)|\\\[([\s\S]+?)\\\])/.exec(src);
             if (match) return { type: "inlineMath", raw: match[0], text: match[1] ?? match[2] ?? match[3] ?? match[4], display: String(match[1] !== undefined || match[4] !== undefined) };
           },
           renderer: mathPlaceholder,
@@ -962,7 +989,7 @@
     let html;
     if (window.marked) {
       try {
-        html = window.marked.parse(markdown, { gfm: true, breaks: false, mangle: false, headerIds: false });
+        html = window.marked.parse(repairDisplayMath(markdown), { gfm: true, breaks: false, mangle: false, headerIds: false });
       } catch {
         html = `<pre>${esc(markdown)}</pre>`;
       }
@@ -975,11 +1002,27 @@
     note.innerHTML = html;
     note.querySelectorAll(".math-source").forEach((element) => {
       const expression = decodeURIComponent(element.dataset.math);
-      window.katex.render(expression, element, {
-        displayMode: element.dataset.display === "true",
-        throwOnError: false,
-        trust: false,
-      });
+      try {
+        window.katex.render(expression, element, {
+          displayMode: element.dataset.display === "true",
+          throwOnError: true,
+          trust: false,
+        });
+      } catch {
+        element.classList.add("math-error");
+        element.title = expression;
+        element.textContent = "Equation could not be rendered";
+      }
+    });
+    note.querySelectorAll("code").forEach((code) => {
+      if (code.closest("pre") || !/\\(?:frac|dfrac|sqrt|lim|sum|int|alpha|beta|theta)\b/.test(code.textContent)) return;
+      const math = document.createElement("span");
+      try {
+        window.katex.render(code.textContent, math, { throwOnError: true, trust: false });
+        code.replaceWith(math);
+      } catch {
+        // Keep uncertain OCR as source text instead of inventing a formula.
+      }
     });
     // The job header already shows the report title; avoid rendering it twice.
     const duplicateTitle = note.querySelector("h1");
@@ -1001,7 +1044,14 @@
       heading.id = id;
       const link = document.createElement("a");
       link.href = `#${id}`;
-      link.textContent = heading.textContent;
+      // Keep KaTeX and other inline formatting from the rendered heading.
+      // textContent exposes KaTeX's underlying LaTeX source in the contents.
+      for (const child of heading.childNodes) link.appendChild(child.cloneNode(true));
+      link.querySelectorAll("a").forEach((nestedLink) => {
+        const span = document.createElement("span");
+        span.replaceChildren(...nestedLink.childNodes);
+        nestedLink.replaceWith(span);
+      });
       link.dataset.target = id;
       if (heading.tagName === "H3") link.classList.add("sub");
       link.addEventListener("click", (event) => {
@@ -1048,7 +1098,7 @@
             : "";
         const texts = (scene.screen_text || [])
           .slice(0, 6)
-          .map((text) => `<span class="text-chip">${esc(text)}</span>`)
+          .map((text) => `<span class="text-chip">${mathHtml(text, true)}</span>`)
           .join("");
         const description =
           (scene.frames.find((frame) => frame.description) || {}).description || "No description available for this scene.";
@@ -1057,13 +1107,13 @@
           <div class="scene-card">
             <div class="scene-head">
               <span class="scene-num">Scene ${String(scene.scene + 1).padStart(2, "0")}</span>
-              <span class="scene-title">${esc(scene.title || "Visual segment")}</span>
+              <span class="scene-title">${mathHtml(scene.title || "Visual segment")}</span>
               ${diagramCount ? `<span class="scene-diagram">${icons.diagram}${diagramCount}</span>` : ""}
               <span class="scene-time">${esc(scene.start_label)} – ${esc(scene.end_label)}</span>
             </div>
             <div class="scene-body">
               <div>
-                <p class="scene-desc">${esc(description)}</p>
+                <p class="scene-desc">${mathHtml(description)}</p>
                 ${texts ? `<div class="scene-texts">${texts}</div>` : ""}
               </div>
               <div class="scene-strip">${thumbs}${extra}</div>
@@ -1143,8 +1193,8 @@
               ${frame.duplicate ? `<span class="frame-dupe">duplicate</span>` : ""}
             </div>
             <div class="frame-body">
-              <div class="frame-scene-title">${esc(title)}</div>
-              <div class="frame-desc">${esc(desc)}</div>
+              <div class="frame-scene-title">${mathHtml(title)}</div>
+              <div class="frame-desc">${mathHtml(desc)}</div>
             </div>
           </button>`;
       })
@@ -1190,10 +1240,10 @@
     $("#lb-scene").textContent = `Scene ${item.scene + 1}`;
     const title = item.sceneTitle || `Frame ${item.index}`;
     const sections = [];
-    if (obs.setting) sections.push(`<h4>Setting</h4><p>${esc(obs.setting)}</p>`);
+    if (obs.setting) sections.push(`<h4>Setting</h4><p>${mathHtml(obs.setting)}</p>`);
     const listSection = (label, values) =>
       values && values.length
-        ? `<h4>${esc(label)}</h4><ul>${values.slice(0, 20).map((value) => `<li>${esc(value)}</li>`).join("")}</ul>`
+        ? `<h4>${esc(label)}</h4><ul>${values.slice(0, 20).map((value) => `<li>${mathHtml(value, label === "On-screen text" || label === "Diagram details")}</li>`).join("")}</ul>`
         : "";
     sections.push(listSection("People", obs.people));
     sections.push(listSection("Objects", obs.objects));
@@ -1212,18 +1262,18 @@
           )}" />`
         : "";
       sections.push(
-        `<h4>Diagram</h4>${diagram.description ? `<p>${esc(diagram.description)}</p>` : ""}${crop}${listSection(
+        `<h4>Diagram</h4>${diagram.description ? `<p>${mathHtml(diagram.description)}</p>` : ""}${crop}${listSection(
           diagram.title || "Diagram details",
           values
         )}`
       );
     }
-    if (obs.visual_notes) sections.push(`<h4>Visual notes</h4><p>${esc(obs.visual_notes)}</p>`);
+    if (obs.visual_notes) sections.push(`<h4>Visual notes</h4><p>${mathHtml(obs.visual_notes)}</p>`);
     if (obs.error) sections.push(`<h4>Error</h4><p>${esc(obs.error)}</p>`);
     $("#lb-details").innerHTML = `
-      <h3>${esc(title)}</h3>
+      <h3>${mathHtml(title)}</h3>
       <div class="lb-sub">Frame ${item.index} · ${esc(item.time_label)} · ${esc(obs.status || "pending")}</div>
-      <p>${esc(item.description || "No description available.")}</p>
+      <p>${mathHtml(item.description || "No description available.")}</p>
       ${sections.join("")}`;
     $("#lb-prev").disabled = state.lbIndex === 0;
     $("#lb-next").disabled = state.lbIndex >= state.lbItems.length - 1;
@@ -1276,11 +1326,122 @@
   /* -------------------------------- tabs -------------------------------- */
 
   function switchTab(tab) {
+    if (tab !== "episodes") $("#tab-episodes video")?.pause();
+    if (tab !== "explainers") {
+      $("#tab-explainers video")?.pause();
+      clearTimeout(state.explainerTimer);
+    }
     state.tab = tab;
     $$(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
     $$(".tabpane").forEach((pane) => pane.classList.toggle("hidden", pane.id !== `tab-${tab}`));
+    if (tab === "episodes") renderEpisodes();
+    if (tab === "explainers") renderExplainers();
     if (tab === "data") renderData();
     if (tab === "costs") renderCosts();
+  }
+
+  async function renderExplainers() {
+    const job = state.job;
+    if (!job) return;
+    clearTimeout(state.explainerTimer);
+    const status = $("#explainer-status");
+    const history = $("#explainer-history");
+    const form = $("#explainer-form");
+    try {
+      const data = await api(`/api/jobs/${job.id}/explainers`);
+      if (state.job?.id !== job.id || state.tab !== "explainers") return;
+      form.hidden = !data.available;
+      status.textContent = data.available ? "" : "This lecture needs completed notes, a transcript, and teacher speech before an explainer can be generated.";
+      const items = data.items || [];
+      const sig = JSON.stringify(items);
+      if (sig !== state.explainerSig) {
+        state.explainerSig = sig;
+        history.innerHTML = items.length ? items.map((item) => {
+          const base = `<div class="explainer-card-head"><h3>${mathHtml(item.topic)}</h3><span>${esc(item.status)} · ${Math.round(item.progress || 0)}%</span></div>`;
+          const detail = item.status === "failed" ? `<p class="explainer-error">${esc(item.error || "Generation failed")}</p>` :
+            `<p>${mathHtml(item.message || "")}</p>`;
+          const media = item.status === "done" ? `<video controls preload="metadata" src="${item.playback_url}" aria-label="Explainer: ${esc(item.topic)}"></video><a class="button" href="${item.download_url}">Download MP4</a>` : "";
+          return `<article class="explainer-card">${base}${detail}${media}</article>`;
+        }).join("") : `<p class="explainer-empty">No explainers yet. Enter a topic from the lecture notes to make one.</p>`;
+      }
+      if (items.some((item) => item.status === "queued" || item.status === "running")) {
+        state.explainerTimer = setTimeout(renderExplainers, 3000);
+      }
+    } catch (error) {
+      if (state.job?.id === job.id) status.textContent = error.message;
+    }
+  }
+
+  function episodeEvidence(group) {
+    const speech = [group?.speech || []].flat();
+    const items = speech.map(s => ({time: s.start, text: s.text, label: "Transcript"}));
+    for (const f of group?.visuals || []) {
+      items.push({time: f.time, text: [...(f.actions || []), f.summary].filter(Boolean).join(" "), label: "Frame " + f.index});
+    }
+    return items.sort((a, b) => a.time - b.time);
+  }
+
+  async function renderEpisodes() {
+    const job = state.job;
+    if (!job) return;
+    const root = $("#tab-episodes");
+    root.textContent = "Loading teaching episodes…";
+    try {
+      const {available, episodes, running, error} = await api(`/api/jobs/${job.id}/teaching-episodes`);
+      if (state.job?.id !== job.id || state.tab !== "episodes") return;
+      if (!episodes.length) {
+        if (running) {
+          root.textContent = "Extracting teaching episodes from the saved transcript and frame observations…";
+          setTimeout(() => {
+            if (state.job?.id === job.id && state.tab === "episodes") renderEpisodes();
+          }, 4000);
+        } else if (available) {
+          root.textContent = "The extractor found no candidate episodes.";
+        } else if (job.transcript_available && job.observations_available) {
+          root.innerHTML = `<p>${esc(error || "Generate teaching episodes from this lecture’s saved transcript and visual observations.")}</p>
+            <button class="button" type="button">Generate teaching episodes</button>`;
+          root.querySelector("button").onclick = async event => {
+            event.currentTarget.disabled = true;
+            try {
+              await api(`/api/jobs/${job.id}/teaching-episodes`, {method: "POST"});
+              if (state.job?.id === job.id && state.tab === "episodes") renderEpisodes();
+            } catch (err) {
+              toast(err.message, "error");
+              if (state.job?.id === job.id && state.tab === "episodes") renderEpisodes();
+            }
+          };
+        } else {
+          root.textContent = "Teaching episodes require a saved transcript and frame observations.";
+        }
+        return;
+      }
+      const player = job.source_available ? '<video controls preload="none" style="width:100%;max-height:40vh" aria-label="Lecture video"></video>' : "";
+      root.innerHTML = player + `<h3>${episodes.length} candidate teaching episodes</h3>` + episodes.map(row => {
+        const target = episodeEvidence(row.target);
+        const time = target[0]?.time;
+        const jump = job.source_available && Number.isFinite(time)
+          ? `<button class="button" type="button" data-seek="${time}">Play at ${fmtClock(time)}</button>` : "";
+        const evidence = [["Lead-up", row.context], ["Teaching move evidence", row.target], ["Follow-up", row.followup]].map(([label, group]) => {
+          const items = episodeEvidence(group);
+          if (!items.length) return "";
+          return `<h4>${label}</h4>${items.map(item => `<p>${fmtClock(item.time)} · ${esc(item.label)} — ${mathHtml(item.text)}</p>`).join("")}`;
+        }).join("");
+        return `<article class="data-card"><h3>${esc(row.target.moves.map(m => m.move.replaceAll("_", " ")).join(", "))}</h3>
+          <p>${mathHtml(row.target.moves.map(m => m.method || m.cue).join(" "))}</p>${jump}
+          <details><summary>Source evidence</summary>${evidence}</details></article>`;
+      }).join("");
+      const video = root.querySelector("video");
+      if (video) video.src = `/api/jobs/${job.id}/source-video`;
+      root.onclick = event => {
+        const button = event.target.closest("[data-seek]");
+        if (!button || !video) return;
+        video.currentTime = Number(button.dataset.seek);
+        video.scrollIntoView({block: "center"});
+        video.play().catch(() => toast("Could not play the source video.", "error"));
+      };
+    } catch (error) {
+      if (state.job?.id === job.id) root.textContent = error.message;
+    }
   }
 
   async function renderCosts() {
@@ -1812,6 +1973,27 @@
     $$(".tab").forEach((button) =>
       button.addEventListener("click", () => switchTab(button.dataset.tab))
     );
+    $("#explainer-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const job = state.job;
+      const topic = $("#explainer-topic").value.trim();
+      if (!job || !topic) return;
+      const button = $("#explainer-form button[type=submit]");
+      button.disabled = true;
+      $("#explainer-status").textContent = "Starting explainer…";
+      try {
+        await api(`/api/jobs/${job.id}/explainers`, {
+          method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({topic}),
+        });
+        $("#explainer-topic").value = "";
+        state.explainerSig = "";
+        await renderExplainers();
+      } catch (error) {
+        $("#explainer-status").textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
 
     // frames
     $("#frame-search").addEventListener("input", () => {

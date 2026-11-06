@@ -973,7 +973,8 @@ img { max-width: 100%; display: block; }
 
 .report-layout { display: grid; grid-template-columns: minmax(0, 1fr) 190px; gap: 46px; align-items: start; }
 .note { min-width: 0; max-width: 820px; }
-.note .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+.katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 0.2em 0; }
+.math-error { color: #a64b43; font-style: italic; }
 .note > *:first-child { margin-top: 0 !important; }
 .note h1 {
   font-size: 34px;
@@ -1079,6 +1080,7 @@ img { max-width: 100%; display: block; }
 .toc nav { display: flex; flex-direction: column; gap: 1px; border-left: 1px solid var(--line); }
 .toc a {
   display: block;
+  overflow-x: auto;
   font-size: 11px;
   line-height: 1.35;
   color: #737b85;
@@ -1549,6 +1551,21 @@ h1, h2, h3, h4, h5, h6, strong, b, button, .button, .new-job, .brand-text,
 }
 
 /* ------------------------------ responsive ------------------------------ */
+
+.explainer-wrap { max-width: 900px; padding: 28px 4px 45px; }
+.explainer-intro h2 { margin: 0 0 8px; font-size: 25px; font-weight: 500; }
+.explainer-intro p, .explainer-empty { color: var(--text-muted, #929aa8); }
+.explainer-form { margin: 28px 0 14px; }
+.explainer-form label { display: block; margin-bottom: 9px; font-size: 13px; }
+.explainer-input-row { display: flex; gap: 10px; }
+.explainer-input-row input { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface, #171c28); color: inherit; font: inherit; }
+.explainer-card { padding: 20px; margin: 16px 0; border: 1px solid var(--line-soft); border-radius: 12px; }
+.explainer-card-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.explainer-card-head h3 { margin: 0; font-size: 19px; font-weight: 500; }
+.explainer-card-head span { color: var(--text-muted, #929aa8); white-space: nowrap; font-size: 13px; }
+.explainer-card video { display: block; width: 100%; max-height: 480px; margin: 14px 0; border-radius: 8px; background: #111827; }
+.explainer-error { color: #e98989; }
+
 
 @media (max-width: 1080px) {
   .report-layout { grid-template-columns: 1fr; }

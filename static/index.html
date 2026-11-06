@@ -10,11 +10,11 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap" rel="stylesheet" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/vendor/katex.min.css" />
-  <link rel="stylesheet" href="/static/styles.css?v=costs-2" />
+  <link rel="stylesheet" href="/static/styles.css?v=math-2" />
   <script src="/static/vendor/marked.min.js" defer></script>
   <script src="/static/vendor/purify.min.js" defer></script>
   <script src="/static/vendor/katex.min.js" defer></script>
-  <script src="/static/app.js?v=costs-3" defer></script>
+  <script src="/static/app.js?v=math-2" defer></script>
 </head>
 <body>
   <div class="app">
@@ -266,6 +266,8 @@
               <button class="tab active" data-tab="report" type="button">Report</button>
               <button class="tab" data-tab="timeline" type="button">Timeline</button>
               <button class="tab" data-tab="frames" type="button">Frames <span class="tab-count" id="tab-frame-count"></span></button>
+              <button class="tab" data-tab="episodes" type="button">Teaching episodes</button>
+              <button class="tab" data-tab="explainers" type="button">Explainers</button>
               <button class="tab" data-tab="data" type="button">Data</button>
               <button class="tab" data-tab="costs" type="button">Costs</button>
             </div>
@@ -303,6 +305,18 @@
               <div class="load-more-wrap"><button class="button" id="load-more" type="button" hidden>Load more frames</button></div>
             </div>
 
+            <div class="tabpane hidden" id="tab-episodes"></div>
+            <div class="tabpane hidden" id="tab-explainers">
+              <div class="explainer-wrap">
+                <div class="explainer-intro"><h2>Explain a topic from this lecture</h2><p>Create an animated lesson using the lecture notes and teacher’s voice. The length follows the topic.</p></div>
+                <form id="explainer-form" class="explainer-form">
+                  <label for="explainer-topic">Topic or subtopic</label>
+                  <div class="explainer-input-row"><input id="explainer-topic" type="text" minlength="3" maxlength="200" placeholder="For example, the chain rule" required /><button class="button primary" type="submit">Generate explainer</button></div>
+                </form>
+                <p id="explainer-status" role="status"></p>
+                <div id="explainer-history"></div>
+              </div>
+            </div>
             <div class="tabpane hidden" id="tab-data">
               <div id="data-view"></div>
             </div>

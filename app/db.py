@@ -4,6 +4,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 from .config import settings
@@ -113,6 +114,23 @@ def init_db() -> None:
                 audio_seconds REAL
             );
             CREATE INDEX IF NOT EXISTS idx_model_costs_job ON model_costs(job_id, id);
+            CREATE TABLE IF NOT EXISTS explainers (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress REAL NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                error TEXT,
+                note_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration REAL,
+                model TEXT NOT NULL,
+                output_dir TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_explainers_job ON explainers(job_id, created_at DESC);
             """
         )
         columns = {row["name"] for row in con.execute("PRAGMA table_info(jobs)").fetchall()}
@@ -185,10 +203,62 @@ def update_job(job_id: str, **fields: Any) -> None:
 
 def delete_job(job_id: str) -> bool:
     with connect() as con:
+        con.execute("DELETE FROM explainers WHERE job_id = ?", (job_id,))
         con.execute("DELETE FROM events WHERE job_id = ?", (job_id,))
         con.execute("DELETE FROM model_costs WHERE job_id = ?", (job_id,))
         cursor = con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
     return cursor.rowcount > 0
+
+
+def create_explainer(job_id: str, topic: str, note_sha256: str, model: str, output_parent: str) -> dict[str, Any]:
+    explainer_id = uuid.uuid4().hex[:14]
+    timestamp = now_iso()
+    with connect() as con:
+        con.execute(
+            "INSERT INTO explainers (id, job_id, topic, status, message, note_sha256, created_at, updated_at, model, output_dir) "
+            "VALUES (?, ?, ?, 'queued', 'Waiting to start', ?, ?, ?, ?, ?)",
+            (explainer_id, job_id, topic, note_sha256, timestamp, timestamp, model, str(Path(output_parent) / explainer_id)),
+        )
+    return get_explainer(job_id, explainer_id)  # type: ignore[return-value]
+
+
+def get_explainer(job_id: str, explainer_id: str) -> dict[str, Any] | None:
+    with connect() as con:
+        row = con.execute("SELECT * FROM explainers WHERE job_id = ? AND id = ?", (job_id, explainer_id)).fetchone()
+    return dict(row) if row else None
+
+
+def list_explainers(job_id: str) -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM explainers WHERE job_id = ? ORDER BY created_at DESC", (job_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def update_explainer(job_id: str, explainer_id: str, **fields: Any) -> None:
+    allowed = {"status", "progress", "message", "error", "finished_at", "duration"}
+    values = {key: value for key, value in fields.items() if key in allowed}
+    if not values:
+        return
+    values["updated_at"] = now_iso()
+    with connect() as con:
+        con.execute(
+            "UPDATE explainers SET " + ", ".join(f"{key} = ?" for key in values) + " WHERE job_id = ? AND id = ?",
+            [*values.values(), job_id, explainer_id],
+        )
+
+
+def mark_explainers_interrupted() -> None:
+    with connect() as con:
+        con.execute(
+            "UPDATE explainers SET status = 'interrupted', message = 'Server restarted during generation', updated_at = ? "
+            "WHERE status IN ('queued', 'running')", (now_iso(),)
+        )
+
+
+def interrupted_explainers() -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM explainers WHERE status = 'interrupted' ORDER BY created_at").fetchall()
+    return [dict(row) for row in rows]
 
 
 def add_model_cost(job_id: str, stage: str, provider: str, model: str,

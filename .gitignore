@@ -6,3 +6,5 @@ data/
 *.log
 .DS_Store
 .pdf-render/node_modules/
+tmp/
+output
