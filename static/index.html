@@ -10,11 +10,11 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&display=swap" rel="stylesheet" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/static/vendor/katex.min.css" />
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=costs-2" />
   <script src="/static/vendor/marked.min.js" defer></script>
   <script src="/static/vendor/purify.min.js" defer></script>
   <script src="/static/vendor/katex.min.js" defer></script>
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js?v=costs-3" defer></script>
 </head>
 <body>
   <div class="app">
@@ -215,11 +215,11 @@
                 </svg>
                 Copy note
               </button>
-              <a class="button primary" id="download-md" href="#" hidden>
+              <a class="button primary" id="download-pdf" href="#" hidden>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
                   <path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" stroke-linecap="round" stroke-linejoin="round" />
                 </svg>
-                Export .md
+                Download PDF notes
               </a>
               <details class="menu" id="job-menu">
                 <summary class="button icon-button" aria-label="More actions">
@@ -267,6 +267,7 @@
               <button class="tab" data-tab="timeline" type="button">Timeline</button>
               <button class="tab" data-tab="frames" type="button">Frames <span class="tab-count" id="tab-frame-count"></span></button>
               <button class="tab" data-tab="data" type="button">Data</button>
+              <button class="tab" data-tab="costs" type="button">Costs</button>
             </div>
 
             <div class="tabpane" id="tab-report">
@@ -304,6 +305,9 @@
 
             <div class="tabpane hidden" id="tab-data">
               <div id="data-view"></div>
+            </div>
+            <div class="tabpane hidden" id="tab-costs">
+              <div id="costs-view"></div>
             </div>
           </section>
         </div>

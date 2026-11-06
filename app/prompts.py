@@ -47,6 +47,7 @@ Rules:
 - Mention charts, graphs, tables, code, slides, maps, and UI explicitly, including readable values and trends.
 - Set has_diagram to true only for a genuine spatial visual such as a chart, plotted graph, flowchart, architecture diagram, map, or labeled schematic. Equations, derivations, lists, text slides, and tables are content for screen_text and equations, not diagrams. For those set has_diagram to false and diagram to null.
 - bbox is the diagram's visible region in normalized coordinates [x, y, width, height] from 0 to 1. Use [0, 0, 1, 1] if it fills the frame.
+- Preserve complete visible questions, answer choices, givens, constraints, and units in screen_text. Do not replace a question with a summary.
 - Extract only legible mathematical equations. Never guess LaTex; leave latex empty when unsure.
 - If a frame is black, blank, blurred, or unusable, say so plainly and set a low confidence.
 - Use [] for empty lists and "" for empty strings. Output JSON only."""
@@ -77,19 +78,13 @@ Return exactly ONE JSON object, with no markdown fences and no commentary:
   "edges": ["connections and flows, written as 'source -> target', including arrow direction"],
   "labels": ["axis titles, legend entries, annotations, and visible labels, verbatim"],
   "values": ["readable data points or metrics, verbatim, such as 'May revenue: $96.4k'"],
-  "render_spec": {
-    "confidence": 0.0,
-    "elements": [
-      {"shape": "line | arrow | circle | ellipse | rect | polyline | polygon | arc | label | lens | resistor | capacitor | battery", "x": 0.0, "y": 0.0, "x2": 1.0, "y2": 1.0, "text": "visible label only", "points": [[0.0, 0.0], [1.0, 1.0]]}
-    ]
-  },
   "confidence": 0.0
 }
 
 Rules:
 - Transcribe every legible label and numeric value exactly, preserving capitalization and units.
 - Explain the diagram's message, not just its appearance.
-- For a spatial STEM figure, provide render_spec with the visible components and their relative positions in the crop (coordinates 0 to 1). This supports geometry, optics, vectors, circuits, chemistry structures, biology schematics, and plotted curves. Use only the primitive shapes listed above. For circle, ellipse and rect, x/y and x2/y2 bound the shape. For line, arrow and circuit components they are endpoints. For polyline and polygon, points are an ordered coordinate list. For arc, x/y is the center, x2/y2 is a point on the arc, and points supplies the visible arc trace. Set render_spec confidence below 0.8 or omit it when components or positions are uncertain. Never infer an unseen component, bond, wire, axis value, or label. A graph polyline requires visible plotted points; do not invent numerical data.
+- The original crop is the final illustration. Extract text for indexing and placement; do not reconstruct geometry or invent labels.
 - If this crop is only an equation, derivation, list, or table, return present: false; its text belongs in the study notes.
 - Use [] for empty lists. Output JSON only."""
 

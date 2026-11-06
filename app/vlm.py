@@ -70,6 +70,8 @@ class VLMResponseError(VLMError):
 @dataclass(slots=True)
 class VLMConfig:
     model: str
+    job_id: str = ""
+    cost_stage: str = ""
     provider: str = field(default_factory=lambda: settings.vlm_provider)
     base_url: str = ""
     api_key: str = ""
@@ -379,6 +381,22 @@ class VLMClient:
             raise VLMError(f"Unexpected VLM response shape: {exc}") from exc
         if not text.strip():
             raise VLMError("VLM returned an empty response")
+        if self.config.job_id:
+            usage = data.get("usage") or {}
+            def count(value):
+                try:
+                    return int(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+            def charge(value):
+                try:
+                    return float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+            from . import db
+            db.add_model_cost(self.config.job_id, self.config.cost_stage, self.config.provider,
+                              self.config.model, count(usage.get("prompt_tokens")),
+                              count(usage.get("completion_tokens")), charge(usage.get("cost")))
         return text
 
     def _frame_messages(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:

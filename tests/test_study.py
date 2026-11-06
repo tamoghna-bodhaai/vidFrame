@@ -1,4 +1,6 @@
 import tempfile
+import cv2
+import numpy as np
 import unittest
 from pathlib import Path
 
@@ -17,7 +19,7 @@ class StudyNotesTests(unittest.TestCase):
         sections = [{"title": "Physics", "start_seconds": 0, "subtopics": [
             {"title": "First concept", "start_seconds": 0, "explanation": ["First explanation."]},
             {"title": "Second concept", "start_seconds": 10, "explanation": ["Second explanation."]}]}]
-        diagram = {"title": "Example diagram", "time_seconds": 15, "generated_image": "diagram.svg"}
+        diagram = {"title": "Example diagram", "time_seconds": 15, "display_image": "diagram.png"}
         note = compile_study("Lecture", frames, observations, {"segments": []}, {"job_id": "abc"}, [diagram], sections)
         self.assertEqual(len(note["equations"]), 1)
         text = study_markdown(note)
@@ -25,7 +27,7 @@ class StudyNotesTests(unittest.TestCase):
         self.assertLess(text.index("Second concept"), text.index("Example diagram"))
         self.assertNotIn("Visual timeline", text)
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "diagram.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"></svg>')
+            cv2.imwrite(str(Path(tmp) / "diagram.png"), np.full((60, 80, 3), 255, np.uint8))
             try:
                 export_pdf(note, Path(tmp), False)
             except RuntimeError as exc:
@@ -33,6 +35,7 @@ class StudyNotesTests(unittest.TestCase):
             tex = (Path(tmp) / "pdf/study-notes.html").read_text()
             self.assertLess(tex.index("Second concept"), tex.index("Example diagram"))
             self.assertNotIn("Canonical diagrams", tex)
+            self.assertIn("diagram.png", tex)
 
     def test_fallback_is_explicit_and_keeps_all_transcript(self):
         note = compile_study("Lecture", [], {}, {"segments": [{"text": "first"}, {"text": "second"}]}, {})

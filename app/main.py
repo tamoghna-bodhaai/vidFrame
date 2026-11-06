@@ -52,7 +52,7 @@ def _serialize(job: dict[str, Any] | None) -> dict[str, Any] | None:
     job["source_available"] = bool(job_dir and any(job_dir.glob("source.*")))
     job["transcript_available"] = bool(job_dir and (job_dir / "transcript.json").exists())
     job["audio_available"] = bool(job_dir and (job_dir / "audio.wav").exists())
-    job["pdf_available"] = bool(job_dir and (job_dir / "pdf" / "study-notes.pdf").exists())
+    job["pdf_available"] = bool(job_dir and any((job_dir / "pdf" / name).exists() for name in ("video_notes.pdf", "study-notes.pdf")))
     job["active"] = pipeline.is_running(job["id"])
     job["display_title"] = job.get("note_title") or job.get("title") or job.get("filename")
     if isinstance(job.get("config"), dict):
@@ -208,6 +208,12 @@ async def list_jobs(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, 
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str) -> dict[str, Any]:
     return _serialize(_require_job(job_id))  # type: ignore[return-value]
+
+
+@app.get("/api/jobs/{job_id}/costs")
+async def get_job_costs(job_id: str) -> dict[str, Any]:
+    _require_job(job_id)
+    return {"items": db.get_model_costs(job_id)}
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -429,7 +435,7 @@ async def diagram_image(job_id: str, name: str) -> FileResponse:
     path = (diagrams_dir / safe_name).resolve()
     if diagrams_dir not in path.parents or not path.exists():
         raise HTTPException(status_code=404, detail="Diagram not found")
-    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+    return FileResponse(path, media_type="image/png" if path.suffix.lower() == ".png" else "image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/jobs/{job_id}/generated-diagrams/{name}")
@@ -594,10 +600,13 @@ async def download(
     }
     filename, media_type = mapping[kind]
     path = _job_dir(job) / filename
+    if kind == "study-pdf" and not path.exists():
+        path = _job_dir(job) / "pdf" / "video_notes.pdf"
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not ready")
     suffix = {"note-md": "md", "note-json": "json", "observations": "jsonl", "frames": "json", "study-pdf": "pdf", "transcript": "json"}[kind]
-    return FileResponse(path, media_type=media_type, filename=f"{stem}.{suffix}")
+    download_name = f"{Path(job['filename']).stem}_notes.pdf" if kind == "study-pdf" else f"{stem}.{suffix}"
+    return FileResponse(path, media_type=media_type, filename=download_name)
 
 
 @app.get("/api/jobs/{job_id}/search")

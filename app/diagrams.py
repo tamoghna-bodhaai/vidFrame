@@ -57,22 +57,29 @@ def coerce_diagram(raw: Any, *, present: bool | None = None) -> dict[str, Any] |
         "bbox": coerce_bbox(raw.get("bbox") or raw.get("box")),
         "confidence": max(0.0, min(1.0, confidence)),
     }
-    if isinstance(raw.get("render_spec"), dict):
-        diagram["render_spec"] = raw["render_spec"]
     if raw.get("image"):
         diagram["image"] = str(raw["image"])
     if raw.get("analysis_model"):
         diagram["analysis_model"] = str(raw["analysis_model"])
     if raw.get("detail_analyzed"):
         diagram["detail_analyzed"] = True
+    if raw.get("diagram_schema_version") == 1:
+        diagram["diagram_schema_version"] = 1
     if raw.get("error"):
         diagram["error"] = str(raw["error"])[:600]
     return diagram
 
 
-def crop_diagram(frame_path: Path, bbox: list[float] | None, out_path: Path, padding: float = 0.02) -> bool:
+def crop_diagram(frame_path: Path, bbox: list[float] | None, out_path: Path, padding: float = 0.02, *, capture=None, seconds: float = 0) -> bool:
     """Crop the detected diagram region (or the whole frame) into a standalone JPEG."""
-    image = cv2.imread(str(frame_path))
+    image = None
+    if capture is not None and capture.isOpened():
+        capture.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000)
+        ok, image = capture.read()
+        if not ok:
+            image = None
+    if image is None:
+        image = cv2.imread(str(frame_path))
     if image is None:
         return False
     height, width = image.shape[:2]
@@ -91,33 +98,21 @@ def crop_diagram(frame_path: Path, bbox: list[float] | None, out_path: Path, pad
 def collect_diagrams(frames: list[dict[str, Any]], observations: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     """Return unique diagrams in chronological order, using observations as source of truth."""
     diagrams: list[dict[str, Any]] = []
-    seen: set[tuple[str, ...]] = set()
     for frame in frames:
         observation = observations.get(frame.get("index"))
         if not observation:
             continue
-        diagram = coerce_diagram(
-            observation.get("diagram"),
-            present=bool(observation.get("has_diagram")),
-        )
-        if not diagram or diagram.get("type", "").lower() not in {"chart", "graph", "flowchart", "architecture", "map", "schematic"}:
+        diagram = coerce_diagram(observation.get("diagram"), present=bool(observation.get("has_diagram")))
+        if not diagram:
             continue
         entry = dict(diagram)
-        entry["time"] = fmt_ts(frame.get("time"))
-        entry["time_seconds"] = frame.get("time")
-        entry["frame_index"] = frame.get("index")
-        entry["scene_index"] = frame.get("scene", 0)
-        signature = (
-            entry.get("type", "").lower(),
-            entry.get("title", "").lower(),
-            entry.get("description", "")[:120].lower(),
-            "|".join(entry.get("values", []))[:200],
-        )
-        if signature in seen:
-            continue
-        seen.add(signature)
+        entry.update(time=fmt_ts(frame.get("time")), time_seconds=frame.get("time"),
+                     frame_index=frame.get("index"), scene_index=frame.get("scene", 0),
+                     id=f"diagram-f{int(frame['index']):05d}")
         diagrams.append(entry)
-    return diagrams
+    # Text similarity is not evidence of identical geometry or labels. Pixel-based
+    # deduplication happens only after source assets have been recovered.
+    return sorted(diagrams, key=lambda item: float(item.get("time_seconds") or 0))
 
 
 def diagram_digest(diagrams: list[dict[str, Any]]) -> str:
@@ -153,5 +148,78 @@ def merge_diagram_details(base: dict[str, Any] | None, detail: dict[str, Any] | 
             if value in (None, "", [], {}):
                 continue
             merged[key] = value
+    merged.pop("semantic_spec", None)
+    merged.pop("render_spec", None)
+    merged.pop("generated_image", None)
     merged["present"] = True
     return merged
+
+
+def prepare_source_assets(job_dir: Path, frames: list[dict], diagrams: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Recover native-resolution crops; retain every distinct observed pixel state.
+
+    Exact pixel deduplication is deliberately conservative: tiny new labels matter.
+    Missing videos fall back to existing crops, then stored frames. No model calls.
+    """
+    import hashlib
+
+    by_index = {frame['index']: frame for frame in frames}
+    sources = sorted(job_dir.glob('source.*'))
+    capture = cv2.VideoCapture(str(sources[0])) if sources else None
+    kept, audit, seen = [], [], {}
+    directory = job_dir / 'diagrams'
+    directory.mkdir(exist_ok=True)
+    (job_dir / "diagrams.zip").unlink(missing_ok=True)
+    try:
+        for source in diagrams:
+            diagram = dict(source)
+            index = int(diagram['frame_index'])
+            diagram_id = diagram.get('id') or f'diagram-f{index:05d}'
+            target = directory / f'f{index:05d}.png'
+            image = None
+            origin = 'original_video'
+            if capture is not None and capture.isOpened():
+                capture.set(cv2.CAP_PROP_POS_MSEC, float(diagram.get('time_seconds') or 0) * 1000)
+                ok, image = capture.read()
+                if not ok:
+                    image = None
+            if image is None:
+                origin = 'stored_crop'
+                existing = (job_dir / str(diagram.get('image') or '')).resolve()
+                if job_dir.resolve() in existing.parents and existing.is_file():
+                    image = cv2.imread(str(existing))
+                if image is None:
+                    origin = 'sampled_frame'
+                    frame = by_index.get(index, {})
+                    image = cv2.imread(str(job_dir / 'frames' / frame.get('file', 'missing')))
+            if image is None:
+                audit.append({'id': diagram_id, 'status': 'missing', 'reason': 'No readable video, crop, or frame'})
+                continue
+            bbox = coerce_bbox(diagram.get('bbox'))
+            if origin != 'stored_crop' and bbox:
+                x, y, w, h = bbox
+                height, width = image.shape[:2]
+                image = image[max(0, int((y-.02)*height)):min(height, int((y+h+.02)*height)),
+                              max(0, int((x-.02)*width)):min(width, int((x+w+.02)*width))]
+            digest = hashlib.sha256(str(image.shape).encode() + image.tobytes()).hexdigest()
+            # Preserve reappearances in different topics/scenes for contextual placement.
+            key = (diagram.get('scene_index', 0), digest)
+            if key in seen:
+                audit.append({'id': diagram_id, 'status': 'duplicate', 'duplicate_of': seen[key]})
+                continue
+            if not cv2.imwrite(str(target), image):
+                audit.append({'id': diagram_id, 'status': 'missing', 'reason': 'Crop write failed'})
+                continue
+            seen[key] = diagram_id
+            diagram.pop('generated_image', None)
+            diagram.pop('semantic_spec', None)
+            diagram.update(id=diagram_id, display_image=f'diagrams/{target.name}',
+                           image=f'diagrams/{target.name}', asset_kind='source_crop',
+                           source_resolution=origin, crop_scope='region' if bbox else 'full_frame')
+            kept.append(diagram)
+            audit.append({'id': diagram_id, 'status': 'included', 'image': diagram['image'],
+                          'source_resolution': origin, 'crop_scope': diagram['crop_scope']})
+    finally:
+        if capture is not None:
+            capture.release()
+    return kept, audit

@@ -100,6 +100,19 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, id);
             CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+            CREATE TABLE IF NOT EXISTS model_costs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                ts TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                cost_usd REAL,
+                audio_seconds REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_model_costs_job ON model_costs(job_id, id);
             """
         )
         columns = {row["name"] for row in con.execute("PRAGMA table_info(jobs)").fetchall()}
@@ -107,6 +120,9 @@ def init_db() -> None:
             con.execute("ALTER TABLE jobs ADD COLUMN diagram_count INTEGER NOT NULL DEFAULT 0")
         if "resume_stage" not in columns:
             con.execute("ALTER TABLE jobs ADD COLUMN resume_stage TEXT")
+        cost_columns = {row["name"] for row in con.execute("PRAGMA table_info(model_costs)").fetchall()}
+        if "audio_seconds" not in cost_columns:
+            con.execute("ALTER TABLE model_costs ADD COLUMN audio_seconds REAL")
 
 
 def _row_to_job(row: sqlite3.Row) -> dict[str, Any]:
@@ -170,8 +186,26 @@ def update_job(job_id: str, **fields: Any) -> None:
 def delete_job(job_id: str) -> bool:
     with connect() as con:
         con.execute("DELETE FROM events WHERE job_id = ?", (job_id,))
+        con.execute("DELETE FROM model_costs WHERE job_id = ?", (job_id,))
         cursor = con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
     return cursor.rowcount > 0
+
+
+def add_model_cost(job_id: str, stage: str, provider: str, model: str,
+                   prompt_tokens: int | None, completion_tokens: int | None,
+                   cost_usd: float | None, audio_seconds: float | None = None) -> None:
+    with connect() as con:
+        con.execute(
+            "INSERT INTO model_costs (job_id, ts, stage, provider, model, prompt_tokens, completion_tokens, cost_usd, audio_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, now_iso(), stage, provider, model, prompt_tokens, completion_tokens, cost_usd, audio_seconds),
+        )
+
+
+def get_model_costs(job_id: str) -> list[dict[str, Any]]:
+    with connect() as con:
+        rows = con.execute("SELECT * FROM model_costs WHERE job_id = ? ORDER BY id", (job_id,)).fetchall()
+    return [dict(row) for row in rows]
 
 
 def add_event(job_id: str, stage: str, message: str, level: str = "info") -> None:

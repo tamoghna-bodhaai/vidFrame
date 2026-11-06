@@ -2,7 +2,7 @@
 
 **Multimodal study notes from video.** vidFrame independently reads sampled visuals and speech,
 keeps timestamped evidence for both, and compiles source-grounded study notes with equations,
-canonical diagrams, Markdown/JSON, and PDF export.
+source diagrams, Markdown/JSON, and PDF export.
 
 - OpenCV frame extraction with perceptual near-duplicate skipping and automatic scene segmentation
 - Local OpenAI-compatible vision backends (**vLLM**, **Ollama**, mocked) plus hosted **OpenRouter**
@@ -11,7 +11,7 @@ canonical diagrams, Markdown/JSON, and PDF export.
 - Real-time live notes while frames are analyzed, with per-frame progress events
 - VLM-only structured diagram/equation extraction, timestamp-aligned transcript artifacts, and
   source crops for provenance
-- Controlled LaTex PDF export with safe equation fallback and optional transcript appendix
+- Chromium PDF export with KaTeX equations and optional transcript appendix
 - Web UI with live progress, visual timeline, searchable frame browser, and lightbox
 - Recompile from stored observations, re-run vision analysis, or reprocess with a new sample rate
 - Every report version is kept on disk for comparison
@@ -116,13 +116,33 @@ fetched from OpenRouter when a key is configured. If no key is set, the UI repor
 unavailable and local jobs continue to work. The server-side key is never included in
 `/api/config` or any other response.
 
-### Speech and vector diagrams
+### Speech and source diagrams
 
-The VLM reads diagram crops and extracts labeled geometry. The application compiles validated
-geometry into SVG; it does not call an image generation model. Configure an OpenAI-compatible speech server
-with `VIDFRAME_STT_BASE_URL`, `VIDFRAME_STT_API_KEY`, `VIDFRAME_STT_MODEL`, and
-`VIDFRAME_STT_TIMEOUT`; it is called at `/audio/transcriptions` and auto-detects language unless a
-job provides one. Source crops remain provenance artifacts when a diagram cannot be drawn reliably.
+Diagrams are preserved as source crops, including their original geometry and labels.
+The detail pass reads labels and relationships for indexing and note context; it does not
+regenerate images. Compilation recovers native-resolution PNG crops from the retained
+video, falling back to existing crops and sampled frames. Compilation first plans complete
+content units (questions with solutions, explanations, procedures, or discussions). Within each
+unit, SIFT features and geometric alignment group repeated views despite camera/presenter motion
+and changing titles. Tracks retain a representative unchanged view, or opening/completed views;
+persistent intermediate states with new visual structure are retained too. All source crops stay
+on disk. This is heuristic selection, not a guarantee of perfect diagram identity or legibility.
+
+The writer receives original questions, givens, answer choices, visual updates, and source speech.
+It writes direct subject notes: theory retains concepts and derivations, actual questions retain
+statements and worked reasoning, and procedures retain meaningful actions. Mixed content can use
+all of these structures. Recording narration, classroom logistics and source-reference prose are
+excluded; meaningful attribution and genuinely necessary uncertainty remain.
+Explicit diagram IDs attach images to the relevant question/step/result, with timestamp fallback.
+Unreferenced non-filler speech is retained as labelled source details in backend JSON only,
+not rendered Markdown or PDF. `content_units`,
+`visual_tracks`, `visual_selection_audit`, `source_coverage_audit`, and `diagram_asset_audit` make
+selection and coverage inspectable. Segment references establish traceability, not proof of factual
+accuracy. Missing bounding boxes retain the full source frame; unreadable labels are not invented.
+Plans and successful compilation responses are cached for inexpensive recompilation.
+Historical generated-SVG downloads remain supported, but new runs do not generate SVGs.
+Configure speech recognition with `VIDFRAME_STT_BASE_URL`, `VIDFRAME_STT_API_KEY`,
+`VIDFRAME_STT_MODEL`, and `VIDFRAME_STT_TIMEOUT`.
 
 ### One-key OpenRouter multimodal setup
 
@@ -154,7 +174,7 @@ The UI's **Settings** dialog shows the active endpoint/model and can query the s
 ## Using the web UI
 
 1. **Upload** a video and optionally change sample rate, frame cap, provider, vision model,
-   diagram model, batch size, and timeout.
+   batch size, and timeout.
 2. Watch live progress: extraction → scene detection → frame analysis → diagram detail pass →
    compilation. New frames are logged individually, and the **Live notes** panel grows as each
    batch completes.
@@ -213,16 +233,14 @@ To generate the synthetic demo video used by the tests:
    actions, verbatim screen text, visual notes, confidence, and an optional diagram object.
    Requests run concurrently (`VIDFRAME_MAX_CONCURRENCY`), with tolerant JSON extraction and a
    repair retry. Each completed frame emits an SSE event and rewrites `live-notes.md`.
-6. **Diagram pass** — diagrams detected in the frame pass are cropped from their frame using the
+6. **Diagram pass** — diagrams detected in the frame pass are cropped from the original video (or stored frame) using the
    normalized bounding box. Each crop is sent to the diagram model with surrounding frame context.
-   The structured result (type, title, description, nodes, edges, labels, values, and optional
-   normalized geometry) is merged back into the observation. Crops are stored under `diagrams/`;
-   validated geometry is drawn as SVG under `generated-diagrams/`.
-7. **Compile** — build a digest of observations, including every diagram. Short videos use a
-   single pass; long ones use chunked map-reduce notes, then a final JSON report. The compiler
-   validates/repairs the result, fills missing tail coverage, preserves all detected diagrams with
-   their image paths, and falls back to a deterministic report if the model cannot produce valid
-   JSON.
+   The structured result (type, title, description, nodes, edges, labels, values) is merged back into the observation. Crops are stored under `diagrams/`;
+   native-resolution source crops are recovered during compilation.
+7. **Compile** — synthesize timestamped speech and visual evidence into topic sections.
+   Recover source crops, group repeated drawing tracks within complete content units, and place
+   selected visual states alongside their question, explanation, or result. No semantic-renderer eligibility filter,
+   concept-selection model, or diagram count cap is applied. Record missing assets in the audit.
 8. **Store** — write `note.md`, `note.json`, and a timestamped copy under `versions/`.
 
 ### Job modes
@@ -345,15 +363,14 @@ Copy `.env.example` to `.env`; environment variables override file values.
 ```
 
 The smoke test verifies extraction, duplicate skipping, diagram crop analysis, transcript storage,
-and successful full, recompile, and reanalyze runs. Unit tests verify vector rendering and saved
-geometry reuse.
+and successful full, recompile, and reanalyze runs. Unit tests verify crop preservation, asset coverage, and timestamp placement.
 
 ---
 
 ## Limitations
 
-- **Visual only.** vidFrame cannot hear audio. Dialogue, narration, and music are not analyzed, and
-  the report should be combined with a transcript when speech matters.
+- **Source quality limits.** Crops preserve unreadable labels, occlusion, and imperfect detection boxes.
+  Visual tracking and state selection are heuristic; no generative repair is applied.
 - **Sampling misses action.** At 1 fps, brief cuts, fast gestures, and text shown for less than a
   second can be missed. Increase the sample rate for dense material.
 - **OCR is model-dependent.** Small text, stylized fonts, subtitles, and low-contrast UI may be
@@ -380,7 +397,6 @@ app/
   vlm.py        Local/OpenRouter client, batching, diagram pass, mock provider, repair
   diagrams.py   Diagram normalization, bbox crops, dedupe, digest, detail merge
   study.py      Topic and subtopic notes, visual placement, Markdown and PDF export
-  vector_spec.py Validated SVG primitive renderer
   compiler.py   Legacy report compiler (unused by the active pipeline)
   prompts.py    Frame/compile/repair prompts
   db.py         SQLite jobs and events

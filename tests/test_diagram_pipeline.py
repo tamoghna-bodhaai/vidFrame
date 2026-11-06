@@ -30,10 +30,10 @@ class FakeVisionClient:
             "type": "schematic",
             "title": "Source circuit",
             "confidence": .95,
-            "render_spec": {"confidence": .95, "elements": [
-                {"shape": "battery", "x": .1, "y": .5, "x2": .3, "y2": .5},
-                {"shape": "resistor", "x": .5, "y": .5, "x2": .8, "y2": .5},
-            ]},
+            "semantic_spec": {"version": 1, "confidence": .95, "kind": "series_circuit", "data": {"components": [
+                {"kind": "battery", "side": "left", "label": "V"},
+                {"kind": "resistor", "side": "top", "label": "R"},
+            ]}},
         }
 
 
@@ -45,9 +45,9 @@ class DiagramPipelineTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(client, "_chat", reply):
             result = await client.analyze_diagram({"time": 0}, "jpeg", {}, {"type": "schematic"})
         self.assertIsNone(result)
-        self.assertIn('"render_spec": {', DIAGRAM_INSTRUCTIONS)
+        self.assertNotIn("semantic_spec", DIAGRAM_INSTRUCTIONS)
 
-    async def test_crop_geometry_persists_and_recompile_renders_vector(self):
+    async def test_crop_persists_and_resume_reuses_ocr(self):
         FakeVisionClient.calls = 0
         with tempfile.TemporaryDirectory() as tmp:
             job_dir = Path(tmp)
@@ -69,12 +69,13 @@ class DiagramPipelineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(FakeVisionClient.calls, 1)
                 saved = pipeline._load_observations(job_dir / "observations.jsonl")
                 self.assertTrue(saved[0]["diagram"]["detail_analyzed"])
-                self.assertIn("render_spec", saved[0]["diagram"])
+                self.assertNotIn("semantic_spec", saved[0]["diagram"])
                 await pipeline._analyze_diagrams(job, job_dir, frames, saved, config, 0, resume=True)
                 self.assertEqual(FakeVisionClient.calls, 1)
-                note = {"diagrams": [saved[0]["diagram"]]}
-                await pipeline._generate_diagrams("test", job_dir, note, config)
-                self.assertTrue((job_dir / note["diagrams"][0]["generated_image"]).is_file())
+                saved[0]["diagram"].pop("diagram_schema_version")
+                await pipeline._analyze_diagrams(job, job_dir, frames, saved, config, 0, resume=True)
+                self.assertEqual(FakeVisionClient.calls, 2)
+                self.assertEqual(saved[0]["diagram"]["diagram_schema_version"], 1)
 
 
 if __name__ == "__main__":

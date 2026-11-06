@@ -1,4 +1,4 @@
-"""Source-grounded multimodal study-note assembly and safe LaTex PDF export."""
+"""Source-grounded study-note assembly and Chromium/KaTeX PDF export."""
 from __future__ import annotations
 
 import json
@@ -21,89 +21,6 @@ _MATH_COMMANDS = {
     "theta", "Theta", "times", "xi", "Xi",
 }
 
-
-_DIAGRAM_STOPWORDS = {
-    "a", "an", "and", "at", "board", "chart", "class", "diagram", "frame", "in", "of",
-    "on", "other", "presentation", "screen", "slide", "the", "this", "to", "with", "whiteboard",
-}
-
-
-def _diagram_terms(diagram: dict) -> set[str]:
-    """Stable content terms used only to collapse repeated visual states."""
-    text = " ".join(
-        str(value)
-        for value in [
-            diagram.get("title", ""),
-            *list(diagram.get("nodes") or [])[:12],
-            *list(diagram.get("labels") or [])[:16],
-            *list(diagram.get("values") or [])[:8],
-        ]
-    ).lower()
-    return {
-        term for term in re.findall(r"[a-z0-9α-ωβγλμνρτφχψω]{2,}", text)
-        if term not in _DIAGRAM_STOPWORDS
-    }
-
-
-def diagram_selection_candidates(diagrams: list[dict], limit: int = 80) -> list[dict]:
-    """Collapse repeated whiteboard states before the compiler decides what to illustrate.
-
-    This is intentionally a *candidate* list, not the final diagram list.  It keeps the
-    strongest source reference for each repeated concept so the text compiler sees the
-    teaching material rather than hundreds of near-identical frames.
-    """
-    groups: list[tuple[set[str], dict]] = []
-    for diagram in diagrams:
-        if float(diagram.get("confidence") or 0) < 0.45:
-            continue
-        terms = _diagram_terms(diagram)
-        # A detected box with no readable structure is poor material for a regenerated
-        # teaching graphic. Keep it out of the paid-generation decision.
-        if len(terms) < 2:
-            continue
-        best: int | None = None
-        best_score = 0.0
-        for position, (existing_terms, _existing) in enumerate(groups):
-            overlap = len(terms & existing_terms) / max(1, len(terms | existing_terms))
-            if overlap > best_score:
-                best, best_score = position, overlap
-        confidence = float(diagram.get("confidence") or 0)
-        if best is not None and best_score >= 0.55:
-            old_terms, old = groups[best]
-            if confidence > float(old.get("confidence") or 0):
-                groups[best] = (old_terms | terms, dict(diagram))
-            else:
-                groups[best] = (old_terms | terms, old)
-        else:
-            groups.append((terms, dict(diagram)))
-    # Prefer readable, structured source evidence; preserve chronology as a tiebreaker.
-    ranked = sorted(
-        (entry for _terms, entry in groups),
-        key=lambda item: (
-            -float(item.get("confidence") or 0),
-            -(len(item.get("labels") or []) + len(item.get("nodes") or []) + len(item.get("values") or [])),
-            float(item.get("time_seconds") or 0),
-        ),
-    )
-    return ranked[:max(0, limit)]
-
-
-def canonical_diagrams(diagrams: list[dict], limit: int) -> list[dict]:
-    """Deterministic conservative fallback when the compiler is unavailable."""
-    limit = max(0, limit)
-    if not limit:
-        return []
-    chosen: list[dict] = []
-    seen: set[str] = set()
-    for diagram in diagram_selection_candidates(diagrams):
-        key = " ".join(sorted(_diagram_terms(diagram)))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        chosen.append(dict(diagram))
-        if len(chosen) >= limit:
-            break
-    return chosen
 
 def approved_latex(value: str, confidence: float) -> str:
     value = (value or "").strip()
@@ -142,7 +59,7 @@ def build_evidence(frames: list[dict], observations: dict[int, dict], transcript
         if obs.get("status") not in {"ok", "partial"}: continue
         time = float(frame.get("time", 0))
         spoken = [s for s in segments if float(s.get("start", 0)) <= time + 2 and float(s.get("end", 0)) >= time - 2]
-        evidence.append({"timestamp": time, "frame_index": frame["index"], "scene": obs.get("scene") or obs.get("summary"), "visual": obs.get("description") or obs.get("summary"), "transcript": spoken, "source_frame": frame.get("file")})
+        evidence.append({"timestamp": time, "frame_index": frame["index"], "scene": obs.get("scene") or obs.get("summary"), "visual": obs.get("description") or obs.get("summary"), "transcript": spoken, "source_frame": frame.get("file"), "visible_text": obs.get("screen_text") or []})
         for item in obs.get("equations") or []:
             raw = str(item.get("raw", "")).strip()
             if raw:
@@ -179,7 +96,7 @@ def compile_study(title: str, frames: list[dict], observations: dict[int, dict],
                   sections: list[dict] | None = None, compilation_warning: str = "") -> dict:
     evidence, raw_equations = build_evidence(frames, observations, transcript)
     diagram_evidence = collect_diagrams(frames, observations)
-    diagrams = selected_diagrams if selected_diagrams is not None else diagram_selection_candidates(diagram_evidence, limit=len(diagram_evidence))
+    diagrams = selected_diagrams if selected_diagrams is not None else diagram_evidence
     # Repeated frames commonly contain the same formula. Preserve the first occurrence.
     equations, seen = [], set()
     for equation in raw_equations:
@@ -209,13 +126,42 @@ def compile_study(title: str, frames: list[dict], observations: dict[int, dict],
         chapter = chapters[index]
         subs = chapter.get("subtopics") or []
         eligible = [sub for sub in subs if float(sub.get("start_seconds", chapter.get("start_seconds", 0)) or 0) <= when]
-        if eligible:
+        if eligible and any("start_seconds" in sub for sub in subs):
             max(eligible, key=lambda sub: float(sub.get("start_seconds", chapter.get("start_seconds", 0)) or 0))[kind].append(item)
         else:
             chapter[kind].append(item)
-    # Raw OCR equations are evidence for synthesis, not automatically publishable formulas.
-    for diagram in diagrams: place(diagram, "diagrams", float(diagram.get("time_seconds") or seconds(diagram.get("time", "0"))))
+    # Explicit compiler references connect figures to their explanation. Validate them
+    # against source-unit bounds; timestamps remain a deterministic fallback.
+    for diagram in diagrams:
+        when = float(diagram.get("time_seconds") or seconds(diagram.get("time", "0")))
+        targets = [sub for chapter in chapters for sub in chapter.get("subtopics", [])
+                   if diagram.get("id") and diagram["id"] in (sub.get("diagram_ids") or [])
+                   and float(diagram.get("unit_start", 0)) <= float(sub.get("start_seconds", 0))
+                   < float(diagram.get("unit_end", float("inf")))]
+        if targets:
+            targets[0]["diagrams"].append(diagram)
+            diagram["placement"] = "explicit_reference"
+        else:
+            unit_start = float(diagram.get("unit_start", 0))
+            unit_end = float(diagram.get("unit_end", float("inf")))
+            roles = {"initial": {"question", "setup"}, "completed": {"reasoning", "result"}}
+            role_targets = [sub for chapter in chapters for sub in chapter.get("subtopics", [])
+                            if sub.get("kind") in roles.get(diagram.get("visual_role"), set())
+                            and unit_start <= float(sub.get("start_seconds", 0)) < unit_end]
+            if role_targets:
+                target = role_targets[0] if diagram.get("visual_role") == "initial" else role_targets[-1]
+                target["diagrams"].append(diagram)
+                diagram["placement"] = "source_unit_role"
+            else:
+                place(diagram, "diagrams", max(when, unit_start))
+                diagram["placement"] = "source_timestamp"
     return {"schema_version": 3, "kind": "multimodal-study-notes", "title": title, "summary": "", "language": transcript.get("language", "auto"), "generated_at": now_iso(), "meta": meta, "chapters": chapters, "equations": equations, "diagrams": diagrams, "evidence": evidence, "timeline": [], "compilation_warning": compilation_warning, "stats": {"diagrams": len(diagrams), "diagram_evidence": len(diagram_evidence), "equations": len(equations)}, "provider": meta.get("provider"), "transcript": {"available": bool(transcript.get("segments")), "segments": len(transcript.get("segments") or [])}}
+
+
+def diagram_caption(diagram: dict) -> str:
+    title = diagram.get("title") or "Diagram"
+    role = {"initial": "Initial state", "completed": "Completed state", "intermediate": "Intermediate state"}.get(diagram.get("visual_role"))
+    return f"{title} ({role}, {fmt_ts(diagram.get('time_seconds', 0))})" if role else title
 
 
 def study_markdown(note: dict) -> str:
@@ -226,12 +172,14 @@ def study_markdown(note: dict) -> str:
         def assets(container: dict) -> None:
             for e in container.get("equations", []): out.extend([f"`{e.get('latex') or e.get('raw')}`", ""])
             for d in container.get("diagrams", []):
-                out.extend([f"**{d.get('title') or 'Diagram'}**", "", d.get("description") or "", ""])
-                image = d.get("generated_image") if str(d.get("generated_image") or "").endswith(".svg") else None
+                out.extend([f"**{diagram_caption(d)}**", "", d.get("description") or "", ""])
+                image = d.get("display_image") or d.get("image") or d.get("generated_image")
                 if image and note.get("meta", {}).get("job_id"):
                     out.extend([f"![Source diagram](/api/jobs/{note['meta']['job_id']}/{image})", ""])
         assets(chapter)
         for sub in chapter.get("subtopics", []):
+            if sub.get("kind") == "source_evidence":
+                continue
             out += [f"### {sub.get('title', 'Explanation')}", ""]
             out += [f"{text}\n" for text in sub.get("explanation", [])]
             assets(sub)
@@ -249,6 +197,12 @@ def _tex(text: str) -> str:
 def _html_text(value: str) -> str:
     """Escape prose while preserving explicitly marked KaTeX math."""
     value = str(value).replace("\x08", r"\b").replace("\x0c", r"\f")
+    # A standalone display formula may arrive without its closing delimiter.
+    # Repair only a math-only block, never infer math boundaries inside prose.
+    stripped = value.strip()
+    if (stripped.startswith("$$") and stripped.count("$") == 2
+            and re.search(r"\\[A-Za-z]+", stripped[2:])):
+        value = stripped + "$$"
     parts = re.split(r"(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])", str(value))
     out = []
     for part in parts:
@@ -272,7 +226,7 @@ def export_pdf(note: dict, job_dir: Path, include_transcript: bool) -> tuple[Pat
     katex_dir = Path(__file__).resolve().parent.parent / ".pdf-render/node_modules/katex/dist"
     if not (katex_dir / "katex.min.js").exists():
         raise RuntimeError("KaTeX is missing; run npm install --prefix .pdf-render")
-    blocks = [f"<h1>{html.escape(note['title'])}</h1>"]
+    blocks = [f"<h1>{_html_text(note['title'])}</h1>"]
     if note.get("compilation_warning"):
         blocks.append(f'<p class="warning">{html.escape(note["compilation_warning"])}</p>')
     def assets(container: dict) -> None:
@@ -280,18 +234,20 @@ def export_pdf(note: dict, job_dir: Path, include_transcript: bool) -> tuple[Pat
             latex = equation.get("latex")
             blocks.append(f'<div class="equation">{_html_text("$$" + latex + "$$") if latex else html.escape(equation.get("raw", ""))}</div>')
         for diagram in container.get("diagrams", []):
-            image = diagram.get("generated_image")
-            if not image or not str(image).endswith(".svg"):
-                continue  # Only deterministic diagrams with verified connections enter the PDF.
+            image = diagram.get("display_image") or diagram.get("image") or diagram.get("generated_image")
+            if not image or Path(str(image)).suffix.lower() not in {".jpg", ".jpeg", ".png", ".svg"}:
+                continue
             image_path = (job_dir / str(image)).resolve()
             if not image_path.is_file() or job_dir.resolve() not in image_path.parents:
                 continue
-            blocks.append(f'<figure><img src="{image_path.as_uri()}"><figcaption>{html.escape(diagram.get("title") or "Diagram")}</figcaption></figure>')
+            blocks.append(f'<figure><img src="{image_path.as_uri()}"><figcaption>{_html_text(diagram_caption(diagram))}</figcaption></figure>')
     for chapter in note.get("chapters", []):
-        blocks.append(f'<h2>{html.escape(chapter["title"])}</h2>')
+        blocks.append(f'<h2>{_html_text(chapter["title"])}</h2>')
         assets(chapter)
         for sub in chapter.get("subtopics", []):
-            blocks.append(f'<h3>{html.escape(sub.get("title") or "Explanation")}</h3>')
+            if sub.get("kind") == "source_evidence":
+                continue
+            blocks.append(f'<h3>{_html_text(sub.get("title") or "Explanation")}</h3>')
             for paragraph in sub.get("explanation", []):
                 for part in re.split(r"\n\s*\n", str(paragraph)):
                     if part.strip(): blocks.append(f'<p>{_html_text(part.strip())}</p>')
@@ -302,13 +258,21 @@ def export_pdf(note: dict, job_dir: Path, include_transcript: bool) -> tuple[Pat
             blocks.append(f'<p><strong>{html.escape(fmt_ts(segment.get("start", 0)))}</strong> {_html_text(segment.get("text", ""))}</p>')
     css = (katex_dir / "katex.min.css").as_uri()
     js = (katex_dir / "katex.min.js").as_uri()
+    font_dir = Path(__file__).resolve().parent / "fonts"
+    roman = (font_dir / "lmroman10-regular.otf").as_uri()
+    roman_bold = (font_dir / "lmroman10-bold.otf").as_uri()
+    roman_italic = (font_dir / "lmroman10-italic.otf").as_uri()
     page_html = f"""<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="{css}">
-<style>@page{{size:A4;margin:19mm 18mm}}body{{font:11pt/1.5 Georgia,serif;color:#161616}}
-h1{{font-size:20pt;margin:0 0 14mm}}h2{{font-size:15pt;margin:10mm 0 4mm;break-after:avoid}}
-h3{{font-size:12pt;margin:7mm 0 2mm;break-after:avoid}}p{{margin:0 0 4mm;white-space:pre-line}}
+<style>@font-face{{font-family:'Latin Modern Roman';src:url('{roman}');font-style:normal;font-weight:400}}
+@font-face{{font-family:'Latin Modern Roman';src:url('{roman_bold}');font-style:normal;font-weight:700}}
+@font-face{{font-family:'Latin Modern Roman';src:url('{roman_italic}');font-style:italic;font-weight:400}}
+@page{{size:A4;margin:19mm 18mm}}body{{font:11pt/1.3 'Latin Modern Roman',serif;color:#111;max-width:150mm;margin:0 auto}}
+h1,h2,h3{{font-family:'Latin Modern Roman',serif;line-height:1.25;break-after:avoid}}
+h1{{font-size:16pt;font-weight:700;text-align:center;margin:0 0 9mm}}h2{{font-size:12pt;font-weight:700;margin:8mm 0 3mm}}
+h3{{font-size:11pt;font-weight:700;margin:5mm 0 2mm}}p{{margin:0 0 3mm;text-align:justify;hyphens:auto;white-space:pre-line}}
 .equation{{margin:6mm 0;text-align:center;break-inside:avoid}}.display{{margin:6mm 0}}
 figure{{margin:7mm auto;text-align:center;break-inside:avoid}}figure img{{max-width:100%;max-height:115mm;object-fit:contain}}
-figcaption{{font:9pt Arial,sans-serif;color:#555;margin-top:2mm}}.warning{{color:#8a3b10}}</style></head>
+figcaption{{font:9pt/1.3 'Latin Modern Roman',serif;color:#333;margin-top:2mm}}.warning{{color:#8a3b10}}</style></head>
 <body>{''.join(blocks)}<script src="{js}"></script><script>
 for(const element of document.querySelectorAll('.math')){{try{{katex.render(element.dataset.tex,element,{{displayMode:element.classList.contains('display'),throwOnError:true}})}}catch(error){{element.textContent=element.dataset.tex;element.style.color='#a00'}}}}
 </script></body></html>"""
@@ -318,6 +282,11 @@ for(const element of document.querySelectorAll('.math')){{try{{katex.render(elem
         page = browser.new_page(viewport={"width": 1100, "height": 1400})
         page.goto(html_path.as_uri(), wait_until="load")
         page.evaluate("document.fonts.ready")
+        broken_images = page.locator('figure img').evaluate_all(
+            "images => images.filter(image => !image.complete || image.naturalWidth === 0).length")
+        if broken_images:
+            browser.close()
+            raise RuntimeError(f"Could not load {broken_images} diagram image(s) in PDF")
         errors = page.locator('.math[style*="color"]').count()
         page.pdf(path=str(output), format="A4", print_background=True)
         browser.close()

@@ -389,6 +389,7 @@
     try {
       const job = await api(`/api/jobs/${id}`);
       applyJob(job);
+      if (!job.note_available) switchTab("costs");
     } catch (error) {
       toast(error.message, "error");
       location.hash = "#/";
@@ -415,7 +416,7 @@
     $("#live-notes-body").innerHTML = "";
     $("#live-notes-count").textContent = "0";
     $("#copy-note-btn").hidden = true;
-    $("#download-md").hidden = true;
+    $("#download-pdf").hidden = true;
     $("#menu-pop").innerHTML = "";
     $("#progress-bar").style.width = "0%";
     $("#progress-pct").textContent = "0%";
@@ -463,7 +464,7 @@
     renderProgress(job);
 
     const hasNote = Boolean(job.note_available);
-    $("#job-content").classList.toggle("hidden", !hasNote);
+    $("#job-content").classList.remove("hidden");
     $("#progress-card").classList.toggle("hidden", job.status === "done" && hasNote);
 
     if (job.frames_available && (!hasNote || ACTIVE.has(job.status))) {
@@ -484,8 +485,8 @@
     const hasNote = Boolean(job.note_available);
     const busy = Boolean(job.active);
     $("#copy-note-btn").hidden = !hasNote;
-    $("#download-md").hidden = !hasNote;
-    if (hasNote) $("#download-md").href = `/api/jobs/${job.id}/download?kind=note-md`;
+    $("#download-pdf").hidden = !job.pdf_available;
+    if (job.pdf_available) $("#download-pdf").href = `/api/jobs/${job.id}/download?kind=study-pdf`;
 
     $("#job-actions").querySelector(".job-controls")?.remove();
     if (busy) {
@@ -684,6 +685,30 @@
   }
 
   function renderLiveNotes(markdown) {
+    const math = (source) => {
+      if (!window.katex) return esc(source);
+      try {
+        return window.katex.renderToString(source, { throwOnError: true, trust: false, output: "html" });
+      } catch {
+        return esc(source);
+      }
+    };
+    const inline = (source) => String(source).split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/g)
+      .map((part) => {
+        if (part.startsWith("$$") && part.endsWith("$$")) return math(part.slice(2, -2));
+        if (part.startsWith("$") && part.endsWith("$")) return math(part.slice(1, -1));
+        if (part.startsWith("\\(") && part.endsWith("\\)")) return math(part.slice(2, -2));
+        if (part.startsWith("\\[") && part.endsWith("\\]")) return math(part.slice(2, -2));
+        return esc(part);
+      }).join("");
+    const label = (source) => {
+      const value = String(source).trim();
+      if (/^(?:\$|\\[([])/.test(value)) return inline(value);
+      // Screen text is OCR, often an equation without Markdown math delimiters.
+      if ((/[=<>]/.test(value) && !/[.!?]$/.test(value)) ||
+          /\\(?:frac|sqrt|theta|alpha|beta)\b/.test(value)) return math(value);
+      return inline(value);
+    };
     const { entries, summary } = parseLiveNotes(markdown);
     $("#live-notes-count").textContent = String(entries.length);
     const body = $("#live-notes-body");
@@ -697,11 +722,11 @@
     }
     body.innerHTML = entries
       .map((entry) => {
-        const description = entry.description.map((line) => `<p class="live-note-desc">${esc(line)}</p>`).join("");
+        const description = entry.description.map((line) => `<p class="live-note-desc">${inline(line)}</p>`).join("");
         const texts = entry.onScreen.length
           ? `<div class="live-note-text">${entry.onScreen
               .slice(0, 14)
-              .map((text) => `<span>${esc(text)}</span>`)
+              .map((text) => `<span>${label(text)}</span>`)
               .join("")}</div>`
           : "";
         const diagrams = entry.diagrams
@@ -710,12 +735,12 @@
             <div class="live-note-diagram">
               <span class="diagram-badge">${icons.diagram}${esc(diagram.type)}</span>
               <strong>${esc(diagram.title)}</strong>
-              ${diagram.description ? `<p class="live-note-desc">${esc(diagram.description)}</p>` : ""}
+              ${diagram.description ? `<p class="live-note-desc">${inline(diagram.description)}</p>` : ""}
               ${
                 diagram.values.length
                   ? `<div class="live-note-text">${diagram.values
                       .slice(0, 10)
-                      .map((value) => `<span>${esc(value)}</span>`)
+                      .map((value) => `<span>${label(value)}</span>`)
                       .join("")}</div>`
                   : ""
               }
@@ -1255,6 +1280,47 @@
     $$(".tab").forEach((button) => button.classList.toggle("active", button.dataset.tab === tab));
     $$(".tabpane").forEach((pane) => pane.classList.toggle("hidden", pane.id !== `tab-${tab}`));
     if (tab === "data") renderData();
+    if (tab === "costs") renderCosts();
+  }
+
+  async function renderCosts() {
+    const job = state.job;
+    if (!job) return;
+    const root = $("#costs-view");
+    root.innerHTML = '<div class="data-card"><p>Loading costs…</p></div>';
+    try {
+      const { items = [] } = await api(`/api/jobs/${job.id}/costs`);
+      if (state.job?.id !== job.id || state.tab !== "costs") return;
+      const groups = new Map();
+      for (const item of items) {
+        const key = `${item.stage}|${item.provider}|${item.model}`;
+        if (!groups.has(key)) groups.set(key, { ...item, calls: 0, prompt: 0, completion: 0, seconds: 0, cost: 0, priced: 0 });
+        const group = groups.get(key);
+        group.calls++;
+        group.prompt += item.prompt_tokens || 0;
+        group.completion += item.completion_tokens || 0;
+        group.seconds += item.audio_seconds || 0;
+        if (item.cost_usd !== null) { group.cost += item.cost_usd; group.priced++; }
+      }
+      const total = [...groups.values()].reduce((sum, group) => sum + group.cost, 0);
+      const priced = items.filter((item) => item.cost_usd !== null).length;
+      const transcription = groups.size && [...groups.values()].some((group) => group.stage === "Transcription");
+      const money = (value) => `$${value.toFixed(value < 0.01 ? 6 : 4)}`;
+      root.innerHTML = `<div class="data-grid"><div class="data-card"><h3>Provider charges</h3><dl class="kv">
+        <dt>Reported total</dt><dd>${priced ? money(total) : "—"}</dd>
+        <dt>Model requests</dt><dd>${items.length}</dd>
+        <dt>Priced requests</dt><dd>${priced} of ${items.length}</dd>
+        <dt>Input tokens</dt><dd>${items.reduce((sum, item) => sum + (item.prompt_tokens || 0), 0).toLocaleString()}</dd>
+        <dt>Output tokens</dt><dd>${items.reduce((sum, item) => sum + (item.completion_tokens || 0), 0).toLocaleString()}</dd>
+      </dl><p>Charges come from provider response usage. Unpriced requests are excluded from the reported total.${!transcription && job.transcript_available ? " No transcription charge was recorded for this run." : ""}</p></div>
+      <div class="data-card"><h3>Breakdown</h3>${groups.size ? [...groups.values()].map((group) => `<div class="cost-row">
+        <strong>${esc(group.stage)}</strong><span>${esc(group.provider)} / ${esc(group.model)}</span>
+        <span>${group.calls} request${group.calls === 1 ? "" : "s"}${group.seconds ? ` · ${group.seconds.toFixed(1)} audio seconds` : ""}${group.prompt || group.completion ? ` · ${group.prompt.toLocaleString()} input · ${group.completion.toLocaleString()} output tokens` : ""}</span>
+        <b>${group.priced ? money(group.cost) : "Charge unavailable"}${group.priced < group.calls ? ` · ${group.calls - group.priced} unpriced` : ""}</b>
+      </div>`).join("") : "<p>No model requests logged for this extraction yet.</p>"}</div></div>`;
+    } catch (error) {
+      root.innerHTML = `<div class="data-card"><p>Could not load costs: ${esc(error.message)}</p></div>`;
+    }
   }
 
   /* -------------------------------- data tab -------------------------------- */

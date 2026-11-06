@@ -842,7 +842,7 @@ img { max-width: 100%; display: block; }
 .live-note-title { font-size: 12px; font-weight: 550; color: #dce0e5; min-width: 0; }
 .live-note-desc { margin: 0; font-size: 11.5px; line-height: 1.55; color: #8d949e; }
 .live-note-text { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
-.live-note-text span {
+.live-note-text > span {
   font-family: var(--mono);
   font-size: 8.5px;
   color: #aeb5bf;
@@ -851,6 +851,8 @@ img { max-width: 100%; display: block; }
   border-radius: 4px;
   padding: 1px 5px;
 }
+.live-note-text .katex { font-size: 1.15em; }
+.live-note-desc .katex { color: inherit; }
 .diagram-badge {
   display: inline-flex;
   align-items: center;
@@ -1334,6 +1336,9 @@ body.locked { overflow: hidden; }
 .kv { display: grid; grid-template-columns: 128px 1fr; gap: 7px 12px; font-size: 11.5px; }
 .kv dt { color: var(--dim); }
 .kv dd { margin: 0; color: #cbd0d6; overflow-wrap: anywhere; }
+.cost-row { display: grid; gap: 4px; padding: 11px 0; border-top: 1px solid var(--line); font-size: 11.5px; }
+.cost-row span { color: var(--dim); overflow-wrap: anywhere; }
+.cost-row b { font-weight: 600; }
 .data-links { display: flex; flex-direction: column; gap: 6px; }
 .data-links a, .data-links button {
   display: flex;

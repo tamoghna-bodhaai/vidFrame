@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from .config import settings
+from . import db
 
 
 async def extract_audio(source: Path, output: Path) -> None:
@@ -80,6 +81,20 @@ async def _transcribe_file(audio: Path, config: dict[str, Any]) -> dict[str, Any
                 response = await client.post(endpoint, data=data, files={"file": (audio.name, handle, "audio/mpeg")})
     response.raise_for_status()
     payload = response.json()
+    usage = payload.get("usage") or {}
+    if config.get("job_id"):
+        def optional_number(value: Any, converter: Any) -> Any:
+            try:
+                return converter(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        db.add_model_cost(
+            config["job_id"], "Transcription", config.get("stt_provider", "local"), config["stt_model"],
+            optional_number(usage.get("input_tokens", usage.get("prompt_tokens")), int),
+            optional_number(usage.get("output_tokens", usage.get("completion_tokens")), int),
+            optional_number(usage.get("cost"), float),
+            optional_number(usage.get("seconds"), float),
+        )
     segments = []
     for index, segment in enumerate(payload.get("segments") or []):
         segments.append({"id": segment.get("id", index), "start": float(segment.get("start", 0)), "end": float(segment.get("end", segment.get("start", 0))), "text": str(segment.get("text", "")).strip(), "confidence": float(segment.get("avg_logprob", segment.get("confidence", 0.7)))})
