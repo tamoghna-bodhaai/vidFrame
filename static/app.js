@@ -106,6 +106,32 @@
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
 
+  function ocrMathExpression(source) {
+    let value = source
+      .replace(/\bLt\s*([A-Za-z])\s*->\s*(-?\d+(?:\.\d+)?)/g, (_, variable, target) =>
+        `\\lim_{${variable}\\to ${target}}`)
+      .replace(/->/g, "\\to ");
+    // OCR writes powers such as e^(x/2); TeX needs braces around the exponent.
+    let result = "";
+    for (let i = 0; i < value.length; i++) {
+      if (value.slice(i, i + 2) === "^(") {
+        let depth = 1;
+        let end = i + 2;
+        for (; end < value.length && depth; end++) {
+          if (value[end] === "(") depth++;
+          else if (value[end] === ")") depth--;
+        }
+        if (!depth) {
+          result += `^{${value.slice(i + 2, end - 1)}}`;
+          i = end - 1;
+          continue;
+        }
+      }
+      result += value[i];
+    }
+    return result;
+  }
+
   function mathHtml(source, ocr = false) {
     const value = String(source ?? "").replace(/\x08/g, "\\b").replace(/\x0c/g, "\\f");
     const render = (expression, displayMode = false) => {
@@ -116,11 +142,11 @@
         return `<span class="math-error" title="${esc(expression)}">Equation could not be rendered</span>`;
       }
     };
-    // OCR often supplies a whole equation without Markdown delimiters.
+    // OCR often supplies plain algebra rather than LaTeX delimiters.
     if (ocr && !/\$|\\[([]/.test(value) &&
-        ((/[=<>]/.test(value) && !/[.!?]$/.test(value)) ||
-         /\\(?:frac|dfrac|sqrt|lim|theta|alpha|beta)\b/.test(value))) {
-      return render(value);
+        /(?:\^|->|[=<>]|\\(?:frac|dfrac|sqrt|lim|theta|alpha|beta)\b)/.test(value) &&
+        (!/\b[A-Za-z]{4,}\b/.test(value) || /\\[A-Za-z]+/.test(value))) {
+      return render(ocrMathExpression(value));
     }
     return value.split(/(\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/g)
       .map((part) => {
